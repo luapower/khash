@@ -4,70 +4,69 @@
 --C code from github.com/attractivechaos/klib (MIT License).
 --Copyright (c) 2008, 2009, 2011 by Attractive Chaos <attractor@live.co.uk>.
 
---[[
+if not ... then require'khash_test'; return end
 
-KHASH_MAP_INIT_INT(32, char)
-int main() {
-	int ret, is_missing;
-	khiter_t k;
-	khash_t(32) *h = kh_init(32);
-	k = kh_put(32, h, 5, &ret);
-	kh_value(h, k) = 10;
-	k = kh_get(32, h, 10);
-	is_missing = (k == kh_end(h));
-	k = kh_get(32, h, 5);
-	kh_del(32, h, k);
-	for (k = kh_begin(h); k != kh_end(h); ++k)
-		if (kh_exist(h, k)) kh_value(h, k) = 1;
-	kh_destroy(32, h);
-	return 0;
+local khash = {}
+setmetatable(khash, khash)
+
+khash.type = {} --support for different key and value types
+
+--lazy load the C namespace to allow the user to provide its own C stdlib
+--functions and also to not depend on the 'low' module from luapower.
+--Usage: set khash.C = {malloc = ..., ...} after loading the module.
+--Alternatively, a C module can be passed directly to map().
+function khash:__index(k)
+	if k == 'C' then
+		local low = require'low'
+		low.include'stdlib.h'
+		low.include'string.h'
+		self.C = low.C
+		return low.C
+	end
+end
+
+local iif = macro(function(cond, t, f) --ternary operator `?:` from 'low' module
+	return quote var v: t:gettype(); if cond then v = t else v = f end in v end
+end)
+
+local khint = int32
+local HASH_UPPER = 0.77
+
+local eq = macro(function(a, b) return `a == b end)
+local as = macro(function(rval, val) return quote rval = val end end)
+
+khash.type[int32] = {
+	hash = macro(function(key) return key end),
+	equal = eq, assign = as, invalid_value = 0,
 }
-]]
 
-setfenv(1, require'low'.C)
-include'stdlib.h'
-include'string.h'
-include'limits.h'
+khash.type[int64] = {
+	hash = macro(function(key) return `[int32](key >> 33 ^ key ^ key << 11) end),
+	equal = eq, assign = as, invalid_value = 0,
+}
+khash.type[&opaque] = khash.type[int64]
 
--- compiler specific configuration
-
-local khint_t = int32
-local khiter_t = khint_t
-
-local isempty           = macro(function(flag, i) return `(flag[i>>4] >> ((i and 0xfU) << 1)) and 2 ~= 0 end)
-local isdel             = macro(function(flag, i) return `(flag[i>>4] >> ((i and 0xfU) << 1)) and 1 ~= 0 end)
-local iseither          = macro(function(flag, i) return `(flag[i>>4] >> ((i and 0xfU) << 1)) and 3 ~= 0 end)
-local set_isdel_false   = macro(function(flag, i) return quote flag[i>>4] = flag[i>>4] and not (1UL << ((i and 0xfU) << 1)) end end)
-local set_isempty_false = macro(function(flag, i) return quote flag[i>>4] = flag[i>>4] and not (2UL << ((i and 0xfU) << 1)) end end)
-local set_isboth_false  = macro(function(flag, i) return quote flag[i>>4] = flag[i>>4] and not (3UL << ((i and 0xfU) << 1)) end end)
-local set_isdel_true    = macro(function(flag, i) return quote flag[i>>4] = flag[i>>4] or 1UL << ((i and 0xfU) << 1) end end)
-
-terra X31_hash_string(s: &int8): khint_t
-	var h: khint_t = @s
+local cs = {type = &int8}
+cs.hash = terra(s: &int8): khint --X31 hash
+	var h: khint = @s
 	if h ~= 0 then
 		s = s + 1
 		while @s ~= 0 do
-			h = (h << 5) - h + [khint_t](s[0])
+			h = (h << 5) - h + [khint](s[0])
 			s = s + 1
 		end
 	end
 	return h
 end
-X31_hash_string:setinlined(true)
+cs.equal = macro(function(a, b, C)
+	return `C.strcmp(a, b) == 0
+end)
+cs.assign = macro(function(rval, val, C)
+	return quote C.strcpy(&rval, val) end
+end)
+khash.type.cstring = cs
 
-terra Wang_hash(key: khint_t): khint_t
-	key = key + not (key << 15)
-	key = key ^     (key >> 10)
-	key = key +     (key << 3)
-	key = key ^     (key >> 6)
-	key = key + not (key << 11)
-	key = key ^     (key >> 16)
-	return key
-end
-Wang_hash:setinlined(true)
---kh_int_hash_func2(key) Wang_hash((khint_t)key)
-
-local fsize = macro(function(m) return `iif(m < 16, 1, m >> 4) end)
+--hashmap implementation
 
 local kroundup32 = macro(function(x)
 	return quote
@@ -81,135 +80,131 @@ local kroundup32 = macro(function(x)
 	end
 end)
 
-local HASH_UPPER = 0.77
+local isempty           = macro(function(flag, i) return `((flag[i>>4] >> ((i and 0xfU) << 1)) and 2) ~= 0 end)
+local isdel             = macro(function(flag, i) return `((flag[i>>4] >> ((i and 0xfU) << 1)) and 1) ~= 0 end)
+local iseither          = macro(function(flag, i) return `((flag[i>>4] >> ((i and 0xfU) << 1)) and 3) ~= 0 end)
+local set_isdel_false   = macro(function(flag, i) return quote flag[i>>4] = flag[i>>4] and not (1UL << ((i and 0xfU) << 1)) end end)
+local set_isempty_false = macro(function(flag, i) return quote flag[i>>4] = flag[i>>4] and not (2UL << ((i and 0xfU) << 1)) end end)
+local set_isboth_false  = macro(function(flag, i) return quote flag[i>>4] = flag[i>>4] and not (3UL << ((i and 0xfU) << 1)) end end)
+local set_isdel_true    = macro(function(flag, i) return quote flag[i>>4] = flag[i>>4] or 1UL << ((i and 0xfU) << 1) end end)
+local fsize             = macro(function(m) return `iif(m < 16, 1, m >> 4) end)
 
-local function __KHASH_PROTOTYPES(name, khkey_t, khval_t)
-	--extern kh_t *kh_init(void);
-	--extern void kh_destroy(kh_t *h);
-	--extern void kh_clear(kh_t *h);
-	--extern khint_t kh_get(const kh_t *h, khkey_t key);
-	--extern int kh_resize(kh_t *h, khint_t new_n_buckets);
-	--extern khint_t kh_put(kh_t *h, khkey_t key, int *ret);
-	--extern void kh_del(kh_t *h, khint_t x);
-end
+--lasterror codes.
+khash.PRESENT =  0 --key was already present
+khash.ABSENT  =  1 --key was added
+khash.DELETED =  2 --key was previously deleted
+khash.ERROR   = -1 --allocation error
 
-local equal = macro(function(a, b) return `a == b end)
-local int64_hash_func = macro(function(key) return `[int32](key>>33^key^key<<11) end)
-local str_hash_equal = macro(function(a, b) return `strcmp(a, b) == 0 end)
+local function map(is_map, key_t, val_t, hash, equal, assign, C)
 
-local khash = macro(function(
-	khkey_t, khval_t, kh_is_map, hash, hash_equal,
-	kcalloc, kmalloc, krealloc, kfree
-)
+	--C dependencies
+	local malloc = C.malloc
+	local realloc = C.realloc
+	local free = C.free
+	local memset = C.memset
 
-	hash_equal = hash_equal or equal
-
-	if not kcalloc then
-		kcalloc = calloc
-		kmalloc = malloc
-		krealloc = realloc
-		kfree = free
-	end
-
-	local kh_t = struct {
-		n_buckets: khint_t;
-		size: khint_t;
-		n_occupied: khint_t;
-		upper_bound: khint_t;
+	local map = struct {
+		n_buckets: khint;
+		count: khint; --number of elements
+		n_occupied: khint;
+		upper_bound: khint;
 		flags: &int32;
-		keys: &khkey_t;
-		vals: &khval_t;
+		keys: &key_t;
+		vals: &val_t;
+		lasterror: khint; --info on the the result of the last put() operation
 	}
 
-	local terra kh_init(): &kh_t
-		return [&kh_t](kcalloc(1, sizeof(kh_t)))
-	end
-	kh_init:setinlined(true)
+	--ctor & dtor
 
-	terra kh_t.methods.destroy(h: &kh_t)
-		if h ~= nil then
-			kfree(h.keys); kfree(h.flags)
-			kfree(h.vals)
-			kfree(h)
-		end
-	end
-	kh_t.methods.destroy:setinlined(true)
-
-	terra kh_t.methods.clear(h: &kh_t)
-		if h ~= nil and h.flags ~= 0 then
-			memset(h.flags, 0xaa, fsize(h.n_buckets) * sizeof(int32))
-			h.size = 0
-			h.n_occupied = 0
-		end
-	end
-	kh_t.methods.clear:setinlined(true)
-
-	terra kh_t.methods.get(h: &kh_t, key: khkey_t): khint_t
-		if h.n_buckets ~= 0 then
-			var k: khint_t, i: khint_t, last: khint_t, mask: khint_t, step: khint_t = 0
-			mask = h.n_buckets - 1
-			k = hash(key); i = k and mask
-			last = i
-			while not isempty(h.flags, i) and (isdel(h.flags, i) or not hash_equal(h.keys[i], key)) do
-				step = step + 1
-				i = (i + step) and mask
-				if i == last then return h.n_buckets end
-			end
-			return iif(iseither(h.flags, i), h.n_buckets, i)
-		else
-			return 0
+	function map.metamethods.__cast(from, to, exp)
+		if from == (`{}):gettype() then --initalize with empty tuple
+			return `map {0, 0, 0, 0, nil, nil, nil, 0}
 		end
 	end
 
-	terra kh_t.methods.resize(h: &kh_t, new_n_buckets: khint_t): int
-		-- This function uses 0.25*n_buckets bytes of working space instead of [sizeof(key_t+val_t)+.25]*n_buckets.
+	terra map.methods.init(h: &map)
+		memset(h, 0, sizeof(map))
+	end
+
+	terra map.methods.free(h: &map)
+		free(h.keys)
+		free(h.flags)
+		free(h.vals)
+		h:init()
+	end
+
+	terra map.methods.clear(h: &map)
+		if h.flags == nil then return end
+		memset(h.flags, 0xaa, fsize(h.n_buckets) * sizeof(int32))
+		h.count = 0
+		h.n_occupied = 0
+	end
+
+	--low level (slot-based) API
+
+	terra map.methods.get_index(h: &map, key: key_t): khint
+		if h.n_buckets == 0 then return -1 end
+		var mask: khint = h.n_buckets - 1
+		var k: khint = hash(key)
+		var i: khint = k and mask
+		var last: khint = i
+		var step: khint = 0
+		while not isempty(h.flags, i) and (isdel(h.flags, i) or not equal(h.keys[i], key, C)) do
+			step = step + 1
+			i = (i + step) and mask
+			if i == last then return -1 end
+		end
+		return iif(iseither(h.flags, i), -1, i)
+	end
+
+	terra map.methods.resize(h: &map, new_n_buckets: khint): bool
+		-- This function uses 0.25*n_buckets bytes of working space instead of (sizeof(key_t+val_t)+.25)*n_buckets.
 		var new_flags: &int32 = nil
-		var j: khint_t = 1
-		do
-			kroundup32(new_n_buckets)
-			if new_n_buckets < 4 then new_n_buckets = 4 end
-			if h.size >= [khint_t](new_n_buckets * HASH_UPPER + 0.5) then j = 0 -- requested size is too small
-			else -- hash table size to be changed (shrink or expand); rehash
-				new_flags = [&int32](kmalloc(fsize(new_n_buckets) * sizeof(int32)))
-				if new_flags == nil then return -1 end
-				memset(new_flags, 0xaa, fsize(new_n_buckets) * sizeof(int32))
-				if h.n_buckets < new_n_buckets then -- expand
-					var new_keys: &khkey_t = [&khkey_t](krealloc(h.keys, new_n_buckets * sizeof(khkey_t)))
-					if new_keys == nil then kfree(new_flags); return -1 end
-					h.keys = new_keys
-					if kh_is_map then
-						var new_vals: &khval_t = [&khval_t](krealloc(h.vals, new_n_buckets * sizeof(khval_t)))
-						if new_vals == nil then kfree(new_flags); return -1 end
-						h.vals = new_vals
-					end
-				end -- otherwise shrink
-			end
+		var j: khint = 1
+		kroundup32(new_n_buckets)
+		if new_n_buckets < 4 then new_n_buckets = 4 end
+		if h.count >= [khint](new_n_buckets * HASH_UPPER + 0.5) then
+			j = 0 -- requested size is too small
+		else -- hash table size to be changed (shrink or expand); rehash
+			new_flags = [&int32](malloc(fsize(new_n_buckets) * sizeof(int32)))
+			if new_flags == nil then return false end
+			memset(new_flags, 0xaa, fsize(new_n_buckets) * sizeof(int32))
+			if h.n_buckets < new_n_buckets then -- expand
+				var new_keys: &key_t = [&key_t](realloc(h.keys, new_n_buckets * sizeof(key_t)))
+				if new_keys == nil then free(new_flags); return false end
+				if is_map then
+					var new_vals: &val_t = [&val_t](realloc(h.vals, new_n_buckets * sizeof(val_t)))
+					if new_vals == nil then free(new_keys); free(new_flags); return false end
+					h.vals = new_vals
+				end
+				h.keys = new_keys
+			end -- otherwise shrink
 		end
 		if j ~= 0 then -- rehashing is needed
 			j = 0
 			while j ~= h.n_buckets do
 				if not iseither(h.flags, j) then
-					var key: khkey_t = h.keys[j]
-					var val: khval_t
-					var new_mask: khint_t = new_n_buckets - 1
-					if kh_is_map then val = h.vals[j] end
+					var key: key_t = h.keys[j]
+					var val: val_t
+					var new_mask: khint = new_n_buckets - 1
+					if is_map then val = h.vals[j] end
 					set_isdel_true(h.flags, j)
 					while true do -- kick-out process; sort of like in Cuckoo hashing
-						var k: khint_t, i: khint_t, step: khint_t = 0
-						var k = hash(key)
-						var i = k and new_mask
+						var k: khint = hash(key)
+						var i: khint = k and new_mask
+						var step: khint = 0
 						while not isempty(new_flags, i) do
 							step = step + 1
 							i = (i + step) and new_mask
 						end
 						set_isempty_false(new_flags, i)
 						if i < h.n_buckets and not iseither(h.flags, i) then -- kick out the existing element
-							do var tmp: khkey_t = h.keys[i]; h.keys[i] = key; key = tmp; end
-							if kh_is_map then var tmp: khval_t = h.vals[i]; h.vals[i] = val; val = tmp; end
+							do var tmp: key_t = h.keys[i]; h.keys[i] = key; key = tmp; end
+							if is_map then var tmp: val_t = h.vals[i]; h.vals[i] = val; val = tmp; end
 							set_isdel_true(h.flags, i) -- mark it as deleted in the old hash table
 						else  -- write the element and jump out of the loop
 							h.keys[i] = key
-							if kh_is_map then h.vals[i] = val end
+							if is_map then h.vals[i] = val end
 							break
 						end
 					end
@@ -217,39 +212,51 @@ local khash = macro(function(
 				j = j + 1
 			end
 			if h.n_buckets > new_n_buckets then -- shrink the hash table
-				h.keys = [&khkey_t](krealloc(h.keys, new_n_buckets * sizeof(khkey_t)))
-				if kh_is_map then h.vals = [&khval_t](krealloc(h.vals, new_n_buckets * sizeof(khval_t))) end
+				var new_keys = [&key_t](realloc(h.keys, new_n_buckets * sizeof(key_t)))
+				if new_keys == nil then free(new_flags); return false end
+				if is_map then
+					var new_vals = [&val_t](realloc(h.vals, new_n_buckets * sizeof(val_t)))
+					if new_vals == nil then free(new_keys); free(new_flags); return false end
+					h.vals = new_vals
+				end
+				h.keys = new_keys
 			end
-			kfree(h.flags) -- free the working space
+			free(h.flags) -- free the working space
 			h.flags = new_flags
 			h.n_buckets = new_n_buckets
-			h.n_occupied = h.size
-			h.upper_bound = [khint_t](h.n_buckets * HASH_UPPER + 0.5)
+			h.n_occupied = h.count
+			h.upper_bound = h.n_buckets * HASH_UPPER + 0.5
 		end
-		return 0
+		return true
 	end
 
-	terra kh_t.methods.put(h: &kh_t, key: khkey_t, ret: &int): khint_t
-		var khint_t x
+	terra map.methods.put_key(h: &map, key: key_t): khint
+		--C.printf('%p %d\n', h, key)
 		if h.n_occupied >= h.upper_bound then -- update the hash table
-			if h.n_buckets > (h.size<<1) then
-				if kh_resize(h, h.n_buckets - 1) < 0 then -- clear "deleted" elements
-					@ret = -1; return h.n_buckets
+			if h.n_buckets > (h.count<<1) then
+				if not h:resize(h.n_buckets - 1) then -- clear "deleted" elements
+					h.lasterror = khash.ERROR
+					return -1
 				end
-			elseif kh_resize(h, h.n_buckets + 1) < 0 then -- expand the hash table
-				@ret = -1; return h.n_buckets
+			elseif not h:resize(h.n_buckets + 1) then -- expand the hash table
+				h.lasterror = khash.ERROR
+				return -1
 			end
-		end -- TODO: to implement automatic shrinking; resize() already supports shrinking
+		end -- TODO: implement automatic shrinking; resize() already supports shrinking
+		var x: khint
 		do
-			var k: khint_t, i: khint_t, site: khint_t, last: khint_t
-			var mask: khint_t = h.n_buckets - 1
-			var step: khint_t = 0
-			x = h.n_buckets; site = x
-			k = hash(key); i = k and mask
-			if isempty(h.flags, i) then x = i -- for speed up
+			x = h.n_buckets
+			var site: khint = x
+			var mask: khint = x - 1
+			var k: khint = hash(key)
+			var i: khint = k and mask
+			var step: khint = 0
+			var last: khint
+			if isempty(h.flags, i) then
+				x = i -- for speed up
 			else
 				last = i
-				while not isempty(h.flags, i) and (isdel(h.flags, i) or not hash_equal(h.keys[i], key)) do
+				while not isempty(h.flags, i) and (isdel(h.flags, i) or not equal(h.keys[i], key, C)) do
 					if isdel(h.flags, i) then site = i end
 					step = step + 1
 					i = (i + step) and mask
@@ -263,94 +270,112 @@ local khash = macro(function(
 		if isempty(h.flags, x) then -- not present at all
 			h.keys[x] = key
 			set_isboth_false(h.flags, x)
-			h.size = h.size + 1; h.n_occupied = h.n_occupied + 1
-			@ret = 1
+			h.count = h.count + 1; h.n_occupied = h.n_occupied + 1
+			h.lasterror = khash.ABSENT
 		elseif isdel(h.flags, x) then -- deleted
 			h.keys[x] = key
 			set_isboth_false(h.flags, x)
-			h.size = h.size + 1
-			@ret = 2
-		else -- Don't touch h.keys[x] if present and not deleted
-			@ret = 0
+			h.count = h.count + 1
+			h.lasterror = khash.DELETED
+		else -- present and not deleted
+			h.lasterror = khash.PRESENT
 		end
 		return x
 	end
 
-	terra kh_t.methods.kh_del(h: &kh_t, x: khint_t)
-		if x ~= h.n_buckets and not iseither(h.flags, x) then
-			set_isdel_true(h.flags, x)
-			h.size = h.size - 1
+	terra map.methods.del_at(h: &map, i: khint)
+		if i ~= h.n_buckets and not iseither(h.flags, i) then
+			set_isdel_true(h.flags, i)
+			h.count = h.count - 1
 		end
 	end
 
-	hk_t.first = macro(function(h) return 0 end)
-	hk_t.last = macro(function(h) return `h.n_buckets end)
-	kh_t.exist = macro(function(h, x) return `not iseither(h.flags, x) end)
-	kh_t.key = macro(function(h, x) return `h.keys[x] end)
-	kh_t.val = macro(function(h, x) return `h.vals[x] end)
+	map.methods.has_at  = macro(function(h, i) return `not iseither(h.flags, i) end)
+	map.methods.key_at  = macro(function(h, i) return `h.keys[i] end)
+	map.methods.val_at  = macro(function(h, i) return `h.vals[i] end)
+	map.methods.eof     = macro(function(h) return `h.n_buckets end)
 
-	function hk_t.metamethods.__for(h, body)
+	map.methods.next_index = macro(function(h, i)
 		return quote
-			var i: khint_t = h:first()
-			while i ~= h:last() do
-				if h:exist(i) then
-					[ body(`h:key(i), `h:val(i)) ]
-				end
+			if i < 0 then return -1 end
+			while i < h:eof() do
 				i = i + 1
+				if h:has_at(i) then
+					return i
+				end
+			end
+			i = -1
+		in
+			i
+		end
+	end)
+
+	--hi-level (key/value pair-based) API
+
+	terra map.methods.put(h: &map, key: key_t, val: val_t)
+		var i = h:put_key(key)
+		if i >= 0 then
+			assign(h:val_at(i), val, C)
+		end
+		return i
+	end
+
+	terra map.methods.has(h: &map, key: key_t)
+		var i = h:get_index(key)
+		return i >= 0
+	end
+
+	local invalid_val = not val_t:ispointer() and 0 or `nil
+	terra map.methods.get(h: &map, key: key_t): {bool, val_t}
+		var i = h:get_index(key)
+		if i < 0 then return false, invalid_val end
+		return true, h:val_at(i)
+	end
+
+	map.methods.invalid_value = macro(function(h)
+		return `[val_t](invalid_val)
+	end)
+
+	terra map.methods.del(h: &map, key: key_t): bool
+		var i = h:get_index(key)
+		if i < 0 then return false end
+		h:del_at(i)
+		return true
+	end
+
+	function map.metamethods.__for(h, body)
+		return quote
+			for i = 0, h:eof() do
+				if h:has_at(i) then
+					[ body(`h:key_at(i), `h:val_at(i)) ]
+				end
 			end
 		end
 	end
 
-end)
+	return map
+end
+local map = terralib.memoize(map)
 
+local map = function(is_map, key_t, val_t, hash, equal, assign, C)
+	local key_tt = khash.type[key_t]
+	local val_tt = khash.type[val_t]
+	key_t = key_tt and key_tt.type or key_t
+	val_t = val_tt and val_tt.type or val_t
+	if invalid_val == nil and val_tt then
+		invalid_val = val_tt.invalid_value
+		if invalid_val == nil and not val_t:ispointer() then
+			invalid_val = 0
+		end
+	end
+	hash = hash or key_tt and key_tt.hash
+	equal = equal or key_tt and key_tt.equal
+	assign = assign or val_tt and val_tt.assign
+	C = C or khash.C
+	return map(is_map, key_t, val_t, hash, equal, assign, C)
+end
 
---[[
--- More convenient interfaces
+function khash.map(...) return map(true, ...) end
+function khash.set(...) return map(false, ...) end
 
---! @function
-  @abstract     Instantiate a hash set containing integer keys
-  @param  name  Name of the hash table [symbol]
-
-#define KHASH_SET_INIT_INT(name)
-	KHASH_INIT(name, int32, char, 0, kh_int_hash_func, kh_int_hash_equal)
-
---! @function
-  @abstract     Instantiate a hash map containing integer keys
-  @param  name  Name of the hash table [symbol]
-  @param  khval_t  Type of values [type]
-
-#define KHASH_MAP_INIT_INT(name, khval_t)
-	KHASH_INIT(name, int32, khval_t, 1, kh_int_hash_func, kh_int_hash_equal)
-
---! @function
-  @abstract     Instantiate a hash set containing 64-bit integer keys
-  @param  name  Name of the hash table [symbol]
-
-#define KHASH_SET_INIT_INT64(name)
-	KHASH_INIT(name, int64, char, 0, kh_int64_hash_func, kh_int64_hash_equal)
-
---! @function
-  @abstract     Instantiate a hash map containing 64-bit integer keys
-  @param  name  Name of the hash table [symbol]
-  @param  khval_t  Type of values [type]
-
-#define KHASH_MAP_INIT_INT64(name, khval_t)
-	KHASH_INIT(name, int64, khval_t, 1, kh_int64_hash_func, kh_int64_hash_equal)
-
-typedef const char *kh_cstr_t;
---! @function
-  @abstract     Instantiate a hash map containing const char* keys
-  @param  name  Name of the hash table [symbol]
-
-#define KHASH_SET_INIT_STR(name)
-	KHASH_INIT(name, kh_cstr_t, char, 0, kh_str_hash_func, kh_str_hash_equal)
-
---! @function
-  @abstract     Instantiate a hash map containing const char* keys
-  @param  name  Name of the hash table [symbol]
-  @param  khval_t  Type of values [type]
-
-#define KHASH_MAP_INIT_STR(name, khval_t)
-	KHASH_INIT(name, kh_cstr_t, khval_t, 1, kh_str_hash_func, kh_str_hash_equal)
-
-]]
+return khash
