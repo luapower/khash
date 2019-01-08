@@ -33,16 +33,15 @@ local khint = int32
 local HASH_UPPER = 0.77
 
 local eq = macro(function(a, b) return `a == b end)
-local as = macro(function(rval, val) return quote rval = val end end)
 
 khash.type[int32] = {
 	hash = macro(function(key) return key end),
-	equal = eq, assign = as, invalid_value = 0,
+	equal = eq,
 }
 
 khash.type[int64] = {
 	hash = macro(function(key) return `[int32](key >> 33 ^ key ^ key << 11) end),
-	equal = eq, assign = as, invalid_value = 0,
+	equal = eq,
 }
 khash.type[&opaque] = khash.type[int64]
 
@@ -60,9 +59,6 @@ cs.hash = terra(s: &int8): khint --X31 hash
 end
 cs.equal = macro(function(a, b, C)
 	return `C.strcmp(a, b) == 0
-end)
-cs.assign = macro(function(rval, val, C)
-	return quote C.strcpy(&rval, val) end
 end)
 khash.type.cstring = cs
 
@@ -89,13 +85,13 @@ local set_isboth_false  = macro(function(flag, i) return quote flag[i>>4] = flag
 local set_isdel_true    = macro(function(flag, i) return quote flag[i>>4] = flag[i>>4] or 1UL << ((i and 0xfU) << 1) end end)
 local fsize             = macro(function(m) return `iif(m < 16, 1, m >> 4) end)
 
---lasterror codes.
+--put_key return codes.
 khash.PRESENT =  0 --key was already present
 khash.ABSENT  =  1 --key was added
 khash.DELETED =  2 --key was previously deleted
 khash.ERROR   = -1 --allocation error
 
-local function map(is_map, key_t, val_t, hash, equal, assign, C)
+local function map(is_map, key_t, val_t, hash, equal, C)
 
 	--C dependencies
 	local malloc = C.malloc
@@ -111,14 +107,13 @@ local function map(is_map, key_t, val_t, hash, equal, assign, C)
 		flags: &int32;
 		keys: &key_t;
 		vals: &val_t;
-		lasterror: khint; --info on the the result of the last put() operation
 	}
 
 	--ctor & dtor
 
 	function map.metamethods.__cast(from, to, exp)
 		if from == (`{}):gettype() then --initalize with empty tuple
-			return `map {0, 0, 0, 0, nil, nil, nil, 0}
+			return `map {0, 0, 0, 0, nil, nil, nil}
 		end
 	end
 
@@ -230,17 +225,15 @@ local function map(is_map, key_t, val_t, hash, equal, assign, C)
 		return true
 	end
 
-	terra map.methods.put_key(h: &map, key: key_t): khint
+	terra map.methods.put_key(h: &map, key: key_t): {int8, khint}
 		--C.printf('%p %d\n', h, key)
 		if h.n_occupied >= h.upper_bound then -- update the hash table
 			if h.n_buckets > (h.count<<1) then
 				if not h:resize(h.n_buckets - 1) then -- clear "deleted" elements
-					h.lasterror = khash.ERROR
-					return -1
+					return khash.ERROR, -1
 				end
 			elseif not h:resize(h.n_buckets + 1) then -- expand the hash table
-				h.lasterror = khash.ERROR
-				return -1
+				return khash.ERROR, -1
 			end
 		end -- TODO: implement automatic shrinking; resize() already supports shrinking
 		var x: khint
@@ -271,16 +264,15 @@ local function map(is_map, key_t, val_t, hash, equal, assign, C)
 			h.keys[x] = key
 			set_isboth_false(h.flags, x)
 			h.count = h.count + 1; h.n_occupied = h.n_occupied + 1
-			h.lasterror = khash.ABSENT
+			return khash.ABSENT, x
 		elseif isdel(h.flags, x) then -- deleted
 			h.keys[x] = key
 			set_isboth_false(h.flags, x)
 			h.count = h.count + 1
-			h.lasterror = khash.DELETED
+			return khash.DELETED, x
 		else -- present and not deleted
-			h.lasterror = khash.PRESENT
+			return khash.PRESENT, x
 		end
-		return x
 	end
 
 	terra map.methods.del_at(h: &map, i: khint)
@@ -313,9 +305,9 @@ local function map(is_map, key_t, val_t, hash, equal, assign, C)
 	--hi-level (key/value pair-based) API
 
 	terra map.methods.put(h: &map, key: key_t, val: val_t)
-		var i = h:put_key(key)
+		var ret, i = h:put_key(key)
 		if i >= 0 then
-			assign(h:val_at(i), val, C)
+			h.vals[i] = val
 		end
 		return i
 	end
@@ -329,12 +321,8 @@ local function map(is_map, key_t, val_t, hash, equal, assign, C)
 	terra map.methods.get(h: &map, key: key_t): {bool, val_t}
 		var i = h:get_index(key)
 		if i < 0 then return false, invalid_val end
-		return true, h:val_at(i)
+		return true, h.vals[i]
 	end
-
-	map.methods.invalid_value = macro(function(h)
-		return `[val_t](invalid_val)
-	end)
 
 	terra map.methods.del(h: &map, key: key_t): bool
 		var i = h:get_index(key)
@@ -347,7 +335,7 @@ local function map(is_map, key_t, val_t, hash, equal, assign, C)
 		return quote
 			for i = 0, h:eof() do
 				if h:has_at(i) then
-					[ body(`h:key_at(i), `h:val_at(i)) ]
+					[ body(`h.keys[i], `h.vals[i]) ]
 				end
 			end
 		end
@@ -357,22 +345,15 @@ local function map(is_map, key_t, val_t, hash, equal, assign, C)
 end
 local map = terralib.memoize(map)
 
-local map = function(is_map, key_t, val_t, hash, equal, assign, C)
+local map = function(is_map, key_t, val_t, hash, equal, C)
 	local key_tt = khash.type[key_t]
 	local val_tt = khash.type[val_t]
 	key_t = key_tt and key_tt.type or key_t
 	val_t = val_tt and val_tt.type or val_t
-	if invalid_val == nil and val_tt then
-		invalid_val = val_tt.invalid_value
-		if invalid_val == nil and not val_t:ispointer() then
-			invalid_val = 0
-		end
-	end
 	hash = hash or key_tt and key_tt.hash
 	equal = equal or key_tt and key_tt.equal
-	assign = assign or val_tt and val_tt.assign
 	C = C or khash.C
-	return map(is_map, key_t, val_t, hash, equal, assign, C)
+	return map(is_map, key_t, val_t, hash, equal, C)
 end
 
 function khash.map(...) return map(true, ...) end

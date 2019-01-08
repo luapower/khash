@@ -28,11 +28,11 @@ local random = terralib.cast({double} -> {double}, math.random)
 
 local map = khash.map(int32, int32)
 
-terra test_int(n: int32)
+terra test_int(n: int, u: double)
 
 	var keys = new(int32, n)
 	for i = 0, n do
-		keys[i] = random(n / 4)
+		keys[i] = random(n * u)
 	end
 
 	var h: map = {}
@@ -40,42 +40,44 @@ terra test_int(n: int32)
 	for i = 0, n do
 		--printf('%p %d %d %d\n', &h, n, x, key)
 		var k = keys[i]
-		var i = h:put_key(k)
+		var i = h:put(k, 0)
 		check(h:key_at(i) == k)
 		--printf('i: %d, lasterror: %d, %p key: %d\n', i, h.lasterror, h.keys, h:key_at(i))
-		if h.lasterror == khash.ABSENT then
-			h:val_at(i) = 0
+		if i >= 0 then
+			h:val_at(i) = h:val_at(i) + 1
 		end
-		--var v = &h:val_at(i)
-		--@v = @v + 1
 	end
-	printf('# unique keys: %d, seconds/mil inputs: %.3f\n',
-		h.count, (clock() - t0) / (n / 1000000.0) )
+	printf('inserts: %d, unique keys: %2.0f%%, seconds/mil inputs: %.3f\n',
+		n, (1.0 * h.count / n) * 100, (clock() - t0) / (n / 1000000.0) )
+
+	t0 = clock()
+	for i = 0, n do
+		check(h:has(keys[i]))
+	end
+	printf('lookups: %d, unique keys: %2.0f%%, seconds/mil inputs: %.3f\n',
+		n, (1.0 * h.count / n) * 100, (clock() - t0) / (n / 1000000.0) )
+
 	h:free()
 end
 
 local terra test()
-	--[=[
-	var map: khash.map(int32, int64) = nil
-	var t0 = clock()
-	for i = 1, 1e6 do
-		map:put(random(1e6), random(1e6))
-		--check(map:get(6) == {true, 5})
-	end
-	printf('time for %d
-	map:put(6, 7); check(map:get(6) == 7)
-	map:put(7, 8)
-	map:put(12, 13)
-	check(map:has(12))
-	map:del(7)
-	check(not map:has(7))
-	check(map:get(7) == [khash.invalid_value[int64]])
-	printf('count: %d\n', map.count)
-	for k,v in map do
+	printf'starting...\n'
+	var h: khash.map(int32, int32) = {}
+	h:put(6, 7); do var ok, val = h:get(6); check(ok and val == 7) end
+	h:put(7, 8)
+	h:put(12, 13)
+	check(h:has(12))
+	h:del(7)
+	check(not h:has(7))
+	do var ok, val = h:get(7) check(not ok) end
+	printf('count: %d\n', h.count)
+	for k,v in h do
 		printf(' %4d -> %4d\n', k, v)
 	end
-	map:free()
-	]=]
-	test_int(10000)
+	h:free()
+
+	test_int(1, 1)
+	test_int(10, 2)
+	test_int(1000000, 1.0/4)
 end
 test()
