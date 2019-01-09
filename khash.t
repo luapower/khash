@@ -226,7 +226,6 @@ local function map(is_map, key_t, val_t, hash, equal, C)
 	end
 
 	terra map.methods.put_key(h: &map, key: key_t): {int8, khint}
-		--C.printf('%p %d\n', h, key)
 		if h.n_occupied >= h.upper_bound then -- update the hash table
 			if h.n_buckets > (h.count<<1) then
 				if not h:resize(h.n_buckets - 1) then -- clear "deleted" elements
