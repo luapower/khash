@@ -9,17 +9,19 @@ if not ... then require'khash_test'; return end
 local khash = {}
 setmetatable(khash, khash)
 
---Lazy load the C namespace to allow the user to provide its own C stdlib
---functions and also to not depend on the 'low' module from luapower.
+--Lazy load the C namespace to allow the user to provide its own C functions.
 --Usage: set `khash.C = {malloc = ..., ...}` after loading the module.
 --Alternatively, a C module can be passed directly to map().
 function khash:__index(k)
 	if k == 'C' then
-		local low = require'low'
-		low.include'stdlib.h'
-		low.include'string.h'
-		self.C = low.C
-		return low.C
+		self.C = {}
+		local stdlib = terralib.includec'stdlib.h'
+		local string = terralib.includec'string.h'
+		self.C.malloc = stdlib.malloc
+		self.C.realloc = stdlib.realloc
+		self.C.free = stdlib.free
+		self.C.memset = string.memset
+		return self.C
 	end
 end
 
