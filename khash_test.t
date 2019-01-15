@@ -1,10 +1,4 @@
-
-local khash = require'khash'
-local time = require'time'
-setfenv(1, require'low'.C)
-
-local clock = terralib.cast({} -> {double}, time.clock)
-local random = terralib.cast({double} -> {double}, math.random)
+setfenv(1, require'low')
 
 local random_keys = function(ktype, gen_key, n)
 	return quote
@@ -22,12 +16,12 @@ local test_speed = function(ktype, vtype, gen_key, n, hash, equal, size_t)
 	C.memset = memset
 	return quote
 		var keys = [random_keys(ktype, gen_key, n)]
-		var h: khash.map(ktype, vtype, hash, equal, C, size_t) = {}
+		var h: map(ktype, vtype, hash, equal, size_t, nil, C) = {}
 		var t0 = clock()
 		for i = 0, n do
 			var k = keys[i]
 			var i = h:put(k, 0)
-			check(h:equal(h:key_at(i), k))
+			assert(h:equal(h:key_at(i), k))
 			if i >= 0 then
 				h:val_at(i) = h:val_at(i) + 1
 			end
@@ -37,7 +31,7 @@ local test_speed = function(ktype, vtype, gen_key, n, hash, equal, size_t)
 
 		t0 = clock()
 		for i = 0, n do
-			check(h:has(keys[i]))
+			assert(h:has(keys[i]))
 		end
 		prf('key size: %2d, lookups: %8d, unique keys: %3.0f%%, mil/sec: %8.3f\n',
 			sizeof(ktype), n, (1.0 * h.count / n) * 100, (n / 1000000.0) / (clock() - t0) )
@@ -105,14 +99,14 @@ local test_speed_tuple16 = function(n, u)
 end
 
 local terra test()
-	var h: khash.map(int32, int32) = {}
-	h:put(6, 7); do var ok, val = h:get(6); check(ok and val == 7) end
+	var h = map(int32, int32)
+	h:put(6, 7); do var ok, val = h:get(6); assert(ok and val == 7) end
 	h:put(7, 8)
 	h:put(12, 13)
-	check(h:has(12))
+	assert(h:has(12))
 	h:del(7)
-	check(not h:has(7))
-	do var ok, val = h:get(7) check(not ok) end
+	assert(not h:has(7))
+	do var ok, val = h:get(7) assert(not ok) end
 	prf('count: %d\n', h.count)
 	for k,v in h do
 		prf(' %4d -> %4d\n', k, v)

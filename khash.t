@@ -4,6 +4,37 @@
 --C code from github.com/attractivechaos/klib (MIT License).
 --Copyright (c) 2008, 2009, 2011 by Attractive Chaos <attractor@live.co.uk>.
 
+--[[  API
+
+	local M = map(key_t=int32, val_t=int32,
+		hash=default_for_key_t, equal=default_for_val_t,
+		size_t=int32, HASH_UPPER=0.77, C)
+	var m = map(...) -- preferred variant
+	var m: M = nil   -- =nil is important! (clunky variant)
+	var m = M(nil)   -- (nil) is important!  (clunky variant)
+	m:free()
+	m:clear()
+
+	m:get_index(key) -> i
+	m:put_key(key) -> khash.PRESENT|ABSENT|DELETED|ERROR, i
+	m:del_at(i)
+	m:has_at(i) -> ?
+	m:key_at(i) -> k
+	m:val_at(i) -> v
+	m:eof() -> last_i+1
+	m:next_index(last_i) -> i
+
+	m:put(k, v) -> i|-1
+	m:has(k) -> ?
+	m:get(k) -> ok?,v
+	m(k) -> ok?,v
+	m:del(k) -> found?
+	for k,v in m do ... end
+
+	map:equal(a, b) -> equal?
+	map:hash(k) -> hash
+]]
+
 if not ... then require'khash_test'; return end
 
 local khash = {}
@@ -25,7 +56,7 @@ function khash:__index(k)
 	end
 end
 
---ternary operator `?:` from 'low' module.
+--ternary operator `?:`.
 local iif = macro(function(cond, t, f)
 	return quote var v: t:gettype(); if cond then v = t else v = f end in v end
 end)
@@ -74,10 +105,7 @@ khash.ABSENT  =  1 --key was added
 khash.DELETED =  2 --key was previously deleted
 khash.ERROR   = -1 --allocation error
 
-local function map(is_map, key_t, val_t, hash, equal, C, size_t, HASH_UPPER)
-
-	size_t = size_t or int32
-	HASH_UPPER = HASH_UPPER or 0.77
+local function map_type(is_map, key_t, val_t, hash, equal, size_t, HASH_UPPER, C)
 
 	--C dependencies.
 	local malloc = C.malloc
@@ -101,20 +129,16 @@ local function map(is_map, key_t, val_t, hash, equal, C, size_t, HASH_UPPER)
 	--ctor & dtor
 
 	function map.metamethods.__cast(from, to, exp)
-		if from == (`{}):gettype() then --initalize with empty tuple
+		if from == niltype or from:isunit() then --nil or {}
 			return `map {0, 0, 0, 0, nil, nil, nil}
 		end
-	end
-
-	terra map.methods.init(h: &map)
-		memset(h, 0, sizeof(map))
 	end
 
 	terra map.methods.free(h: &map)
 		free(h.keys)
 		free(h.flags)
 		free(h.vals)
-		h:init()
+		memset(h, 0, sizeof(map))
 	end
 
 	terra map.methods.clear(h: &map)
@@ -312,6 +336,7 @@ local function map(is_map, key_t, val_t, hash, equal, C, size_t, HASH_UPPER)
 		if i < 0 then return false, invalid_val end
 		return true, h.vals[i]
 	end
+	map.metamethods.__apply = map.methods.get
 
 	terra map.methods.del(h: &map, key: key_t): bool
 		var i = h:get_index(key)
@@ -335,7 +360,7 @@ local function map(is_map, key_t, val_t, hash, equal, C, size_t, HASH_UPPER)
 
 	return map
 end
-local map = terralib.memoize(map)
+map_type = terralib.memoize(map_type)
 
 --specialization for different key and value types ---------------------------
 
@@ -395,7 +420,9 @@ khash.type.cstring = {
 	end),
 }
 
-local map = function(is_map, key_t, val_t, hash, equal, C, size_t, HASH_UPPER)
+local map_type = function(is_map, key_t, val_t, hash, equal, size_t, HASH_UPPER, C)
+	key_t = key_t or int32
+	val_t = val_t or int32
 	local key_tt = khash.type[key_t]
 	local val_tt = khash.type[val_t]
 	key_t = key_tt and key_tt.type or key_t
@@ -406,7 +433,8 @@ local map = function(is_map, key_t, val_t, hash, equal, C, size_t, HASH_UPPER)
 	equal = equal or key_tt and key_tt.equal
 		or key_t:ispointer() and hash.type[int64].equal
 		or khash.type.default.equal
-
+	size_t = size_t or int32
+	HASH_UPPER = HASH_UPPER or 0.77
 	--if hash() and/or equal() are terra functions, wrap them into macros
 	--so that we can discard the surplus `env` argument before calling them.
 	if terralib.type(hash) == 'terrafunction' then
@@ -417,12 +445,27 @@ local map = function(is_map, key_t, val_t, hash, equal, C, size_t, HASH_UPPER)
 		local userequal = equal
 		equal = macro(function(k, env) return `userequal(k) end)
 	end
-
 	C = C or khash.C
-	return map(is_map, key_t, val_t, hash, equal, C, size_t, HASH_UPPER)
+	return map_type(is_map, key_t, val_t, hash, equal, size_t, HASH_UPPER, C)
 end
 
-function khash.map(...) return map(true, ...) end
-function khash.set(...) return map(false, ...) end
+local function genmacro(is_map)
+	local map_type = function(...) return map_type(is_map, ...) end
+	return macro(
+		--calling it from Terra returns a new map.
+		function(key_t, val_t, hash, equal, size_t, HASH_UPPER)
+			key_t = key_t and key_t:astype()
+			val_t = val_t and val_t:astype()
+			size_t = size_t and size_t:astype()
+			local map = map_type(key_t, val_t, hash, equal, size_t, HASH_UPPER)
+			return `map(nil)
+		end,
+		--calling it from Lua or from an escape or in a type declaration returns
+		--just the type, and you can also pass a custom C namespace.
+		map_type
+	)
+end
+khash.map = genmacro(true)
+khash.set = genmacro(false)
 
 return khash
