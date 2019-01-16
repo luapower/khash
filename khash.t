@@ -14,26 +14,32 @@
 	var m = M(nil)   -- (nil) is important!
 	m:free()
 	m:clear()
+	m.count
 
 	m:get_index(k) -> i
 	m:put_key(k) -> khash.PRESENT|ABSENT|DELETED|ERROR, i
 	m:del_at(i)
 	m:has_at(i) -> ?
-	m:key_at(i) -> k
-	m:val_at(i) -> v
+	m:key_at(i) -> k (unchecked!)
+	m:val_at(i) -> v (unchecked!)
 	m:eof() -> last_i+1
 	m:next_index(last_i) -> i
 
 	m:has(k) -> ?
-	m:getref(k) -> &v|nil
+	m:byref(k) -> &v|nil
 	m:get(k, default_v) -> v
 	m(k, default_v) -> v
-	m:set(k, v) -> i|-1
+	m:put(k, v) -> i|-1
+	m:putifnew(k, v) -> i|-1
 	m:del(k) -> found?
 	for k,v in m do ... end
 
-	map:equal(a, b) -> equal?
-	map:hash(k) -> hash
+	m:equal(a, b) -> ?
+	m:hash(k) -> hash
+
+	m:merge(m)
+	m:update(m)
+
 ]]
 
 if not ... then require'khash_test'; return end
@@ -296,10 +302,12 @@ local function map_type(is_map, key_t, val_t, hash, equal, size_t, HASH_UPPER, C
 		end
 	end
 
-	map.methods.has_at  = macro(function(h, i) return `not iseither(h.flags, i) end)
+	map.methods.eof     = macro(function(h) return `h.n_buckets end)
+	map.methods.has_at  = macro(function(h, i)
+		return `i >= 0 and i < h.n_buckets and not iseither(h.flags, i)
+	end)
 	map.methods.key_at  = macro(function(h, i) return `h.keys[i] end)
 	map.methods.val_at  = macro(function(h, i) return `h.vals[i] end)
-	map.methods.eof     = macro(function(h) return `h.n_buckets end)
 
 	map.methods.next_index = macro(function(h, i)
 		return quote
@@ -318,9 +326,17 @@ local function map_type(is_map, key_t, val_t, hash, equal, size_t, HASH_UPPER, C
 
 	--hi-level (key/value pair-based) API
 
-	terra map.methods.set(h: &map, key: key_t, val: val_t)
+	terra map.methods.put(h: &map, key: key_t, val: val_t)
 		var ret, i = h:put_key(key)
 		if i >= 0 then
+			h.vals[i] = val
+		end
+		return i
+	end
+
+	terra map.methods.putifnew(h: &map, key: key_t, val: val_t)
+		var ret, i = h:put_key(key)
+		if i >= 0 and ret ~= khash.PRESENT then
 			h.vals[i] = val
 		end
 		return i
@@ -331,7 +347,7 @@ local function map_type(is_map, key_t, val_t, hash, equal, size_t, HASH_UPPER, C
 		return i >= 0
 	end
 
-	terra map.methods.getref(h: &map, key: key_t): &val_t
+	terra map.methods.byref(h: &map, key: key_t): &val_t
 		var i = h:get_index(key)
 		if i < 0 then return nil end
 		return &h.vals[i]
@@ -363,6 +379,9 @@ local function map_type(is_map, key_t, val_t, hash, equal, size_t, HASH_UPPER, C
 
 	map.methods.equal = macro(function(h, a, b) return `equal(a, b, env) end)
 	map.methods.hash = macro(function(h, e) return `hash(e, env) end)
+
+	terra map:merge(m: &map) for k,v in m do self:putifnew(k,v) end end
+	terra map:update(m: &map) for k,v in m do self:put(k,v) end end
 
 	return map
 end
