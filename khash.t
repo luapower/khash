@@ -25,10 +25,10 @@
 	m:key_at(i) -> k (unchecked!)
 	m:val_at(i) -> v (unchecked!)
 	m:eof() -> last_i+1
-	m:next_index(last_i) -> i
+	m:next_index([last_i]) -> i|-1
 
 	m:has(k) -> ?
-	m:byref(k) -> &v|nil
+	m:at(k) -> &v|nil
 	m:get(k, default_v) -> v
 	m(k, default_v) -> v
 	m:put(k, v) -> i|-1
@@ -310,9 +310,10 @@ local function map_type(is_map, key_t, val_t, hash, equal, size_t, HASH_UPPER, C
 	map.methods.key_at  = macro(function(h, i) return `h.keys[i] end)
 	map.methods.val_at  = macro(function(h, i) return `h.vals[i] end)
 
+	--returns -1 on eof, which is also the start index which can be omitted.
 	map.methods.next_index = macro(function(h, i)
+		i = i or -1
 		return quote
-			if i < 0 then return -1 end
 			while i < h:eof() do
 				i = i + 1
 				if h:has_at(i) then
@@ -348,7 +349,7 @@ local function map_type(is_map, key_t, val_t, hash, equal, size_t, HASH_UPPER, C
 		return i >= 0
 	end
 
-	terra map.methods.byref(h: &map, key: key_t): &val_t
+	terra map.methods.at(h: &map, key: key_t): &val_t
 		var i = h:get_index(key)
 		if i < 0 then return nil end
 		return &h.vals[i]
