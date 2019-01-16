@@ -4,6 +4,8 @@
 --C code from github.com/attractivechaos/klib (MIT License).
 --Copyright (c) 2008, 2009, 2011 by Attractive Chaos <attractor@live.co.uk>.
 
+--stdlib deps: realloc, memset, memcmp, strcmp.
+
 --[[  API
 
 	local M = map(key_t=int32, val_t=int32,
@@ -48,17 +50,17 @@ local khash = {}
 setmetatable(khash, khash)
 
 --Lazy load the C namespace to allow the user to provide its own C functions.
---Usage: set `khash.C = {malloc = ..., ...}` after loading the module.
+--Usage: set `khash.C = {realloc = ..., ...}` after loading the module.
 --Alternatively, a C module can be passed directly to map().
 function khash:__index(k)
 	if k == 'C' then
 		self.C = {}
 		local stdlib = terralib.includec'stdlib.h'
 		local string = terralib.includec'string.h'
-		self.C.malloc = stdlib.malloc
 		self.C.realloc = stdlib.realloc
-		self.C.free = stdlib.free
 		self.C.memset = string.memset
+		self.C.memcmp = string.memset
+		self.C.strcmp = string.strcmp
 		return self.C
 	end
 end
@@ -115,10 +117,9 @@ khash.ERROR   = -1 --allocation error
 local function map_type(is_map, key_t, val_t, hash, equal, size_t, HASH_UPPER, C)
 
 	--C dependencies.
-	local malloc = C.malloc
 	local realloc = C.realloc
-	local free = C.free
 	local memset = C.memset
+	local free = macro(function(p) return `realloc(p, 0) end)
 
 	local map = struct {
 		n_buckets: size_t;
@@ -182,7 +183,7 @@ local function map_type(is_map, key_t, val_t, hash, equal, size_t, HASH_UPPER, C
 		if h.count >= [size_t](new_n_buckets * HASH_UPPER + 0.5) then
 			j = 0 -- requested size is too small
 		else -- hash table size to be changed (shrink or expand); rehash
-			new_flags = [&int32](malloc(fsize(new_n_buckets) * sizeof(int32)))
+			new_flags = [&int32](realloc(nil, fsize(new_n_buckets) * sizeof(int32)))
 			if new_flags == nil then return false end
 			memset(new_flags, 0xaa, fsize(new_n_buckets) * sizeof(int32))
 			if h.n_buckets < new_n_buckets then -- expand
