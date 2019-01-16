@@ -418,17 +418,19 @@ khash.type[int32] = {
 
 local K = 2654435769ULL --Knuth's
 khash.type[int64] = {
-	hash = macro(function(n)
+	hash32 = macro(function(n)
 		--return `[uint64](n) * 11400714819323198485LLU --Fibonnacci
 		return `([int32](n) * K + [int32](n >> 32) * K) >> 31 --Knuth
 	end),
+	hash64 = macro(function(n) return n end),
 	equal = direct_cmp,
 }
 
 --null-terminated strings
 khash.type.cstring = {
 	type = &int8,
-	hash = macro(function(s) --X31 hash
+	hash = macro(function(s, env) --X31 hash
+		local size_t = env:asvalue().size_t
 		return quote
 			var h: size_t = @s
 			if h ~= 0 then
@@ -453,13 +455,16 @@ local map_type = function(is_map, key_t, val_t, hash, equal, size_t, HASH_UPPER,
 	local val_tt = khash.type[val_t]
 	key_t = key_tt and key_tt.type or key_t
 	val_t = val_tt and val_tt.type or val_t
-	hash = hash or key_tt and key_tt.hash
-		or key_t:ispointer() and khash.type[int64].hash
+	--using 64bit hashes for 64bit keys allows using the much faster identity hash.
+	size_t = size_t or int32
+	local hashname = sizeof(size_t) == 8 and 'hash64' or 'hash32'
+	hash = hash or key_tt and (key_tt[hashname] or key_tt.hash)
+		or key_t:ispointer() and khash.type[int64][hashname]
+		or khash.type.default[hashname]
 		or khash.type.default.hash
 	equal = equal or key_tt and key_tt.equal
-		or key_t:ispointer() and hash.type[int64].equal
+		or key_t:ispointer() and khash.type[int64].equal
 		or khash.type.default.equal
-	size_t = size_t or int32
 	HASH_UPPER = HASH_UPPER or 0.77
 	--if hash() and/or equal() are terra functions, wrap them into macros
 	--so that we can discard the surplus `env` argument before calling them.
