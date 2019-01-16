@@ -10,13 +10,13 @@
 		hash=default_for_key_t, equal=default_for_val_t,
 		size_t=int32, HASH_UPPER=0.77, C)
 	var m = map(...) -- preferred variant
-	var m: M = nil   -- =nil is important! (clunky variant)
-	var m = M(nil)   -- (nil) is important!  (clunky variant)
+	var m: M = nil   -- =nil is important!
+	var m = M(nil)   -- (nil) is important!
 	m:free()
 	m:clear()
 
-	m:get_index(key) -> i
-	m:put_key(key) -> khash.PRESENT|ABSENT|DELETED|ERROR, i
+	m:get_index(k) -> i
+	m:put_key(k) -> khash.PRESENT|ABSENT|DELETED|ERROR, i
 	m:del_at(i)
 	m:has_at(i) -> ?
 	m:key_at(i) -> k
@@ -24,10 +24,11 @@
 	m:eof() -> last_i+1
 	m:next_index(last_i) -> i
 
-	m:put(k, v) -> i|-1
 	m:has(k) -> ?
-	m:get(k) -> ok?,v
-	m(k) -> ok?,v
+	m:getref(k) -> &v|nil
+	m:get(k, default_v) -> v
+	m(k, default_v) -> v
+	m:set(k, v) -> i|-1
 	m:del(k) -> found?
 	for k,v in m do ... end
 
@@ -317,7 +318,7 @@ local function map_type(is_map, key_t, val_t, hash, equal, size_t, HASH_UPPER, C
 
 	--hi-level (key/value pair-based) API
 
-	terra map.methods.put(h: &map, key: key_t, val: val_t)
+	terra map.methods.set(h: &map, key: key_t, val: val_t)
 		var ret, i = h:put_key(key)
 		if i >= 0 then
 			h.vals[i] = val
@@ -330,11 +331,16 @@ local function map_type(is_map, key_t, val_t, hash, equal, size_t, HASH_UPPER, C
 		return i >= 0
 	end
 
-	local invalid_val = not val_t:ispointer() and 0 or `nil
-	terra map.methods.get(h: &map, key: key_t): {bool, val_t}
+	terra map.methods.getref(h: &map, key: key_t): &val_t
 		var i = h:get_index(key)
-		if i < 0 then return false, invalid_val end
-		return true, h.vals[i]
+		if i < 0 then return nil end
+		return &h.vals[i]
+	end
+
+	terra map.methods.get(h: &map, key: key_t, default: val_t): val_t
+		var i = h:get_index(key)
+		if i < 0 then return default end
+		return h.vals[i]
 	end
 	map.metamethods.__apply = map.methods.get
 
