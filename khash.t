@@ -1,16 +1,15 @@
 
---Port of khash.h v0.2.8 to Terra.
+--Hashmap type for Terra.
 --Written by Cosmin Apreutesei. Public Domain.
---C code from github.com/attractivechaos/klib (MIT License).
+--Port of khash.h v0.2.8 from github.com/attractivechaos/klib (MIT License).
 --Copyright (c) 2008, 2009, 2011 by Attractive Chaos <attractor@live.co.uk>.
 
 --stdlib deps: realloc, memset, memcmp, strcmp.
 
 --[[  API
 
-	local M = map(key_t=int32, val_t=int32,
-		hash=default_for_key_t, equal=default_for_val_t,
-		size_t=int32, HASH_UPPER=0.77, C)
+	local M = map{key_t=int32, val_t=int32, hash=default_for_key_t,
+		equal=default_for_val_t, size_t=int32, UPPER=0.77, C=require'low'}
 	var m = map(...) -- preferred variant
 	var m: M = nil   -- =nil is important!
 	var m = M(nil)   -- (nil) is important!
@@ -29,8 +28,7 @@
 
 	m:has(k) -> ?
 	m:at(k) -> &v|nil
-	m:get(k, default_v) -> v
-	m(k, default_v) -> v
+	m[:get](k, default_v) -> v
 	m:put(k, v) -> i|-1
 	m:putifnew(k, v) -> i|-1
 	m:del(k) -> found?
@@ -48,22 +46,6 @@ if not ... then require'khash_test'; return end
 
 local khash = {}
 setmetatable(khash, khash)
-
---Lazy load the C namespace to allow the user to provide its own C functions.
---Usage: set `khash.C = {realloc = ..., ...}` after loading the module.
---Alternatively, a C module can be passed directly to map().
-function khash:__index(k)
-	if k == 'C' then
-		self.C = {}
-		local stdlib = terralib.includec'stdlib.h'
-		local string = terralib.includec'string.h'
-		self.C.realloc = stdlib.realloc
-		self.C.memset = string.memset
-		self.C.memcmp = string.memset
-		self.C.strcmp = string.strcmp
-		return self.C
-	end
-end
 
 --ternary operator `?:`.
 local iif = macro(function(cond, t, f)
@@ -114,7 +96,7 @@ khash.ABSENT  =  1 --key was added
 khash.DELETED =  2 --key was previously deleted
 khash.ERROR   = -1 --allocation error
 
-local function map_type(is_map, key_t, val_t, hash, equal, size_t, HASH_UPPER, C)
+local function map_type(is_map, key_t, val_t, hash, equal, size_t, UPPER, C)
 
 	--C dependencies.
 	local realloc = C.realloc
@@ -180,7 +162,7 @@ local function map_type(is_map, key_t, val_t, hash, equal, size_t, HASH_UPPER, C
 		var j: size_t = 1
 		roundup32(new_n_buckets)
 		if new_n_buckets < 4 then new_n_buckets = 4 end
-		if h.count >= [size_t](new_n_buckets * HASH_UPPER + 0.5) then
+		if h.count >= [size_t](new_n_buckets * UPPER + 0.5) then
 			j = 0 -- requested size is too small
 		else -- hash table size to be changed (shrink or expand); rehash
 			new_flags = [&int32](realloc(nil, fsize(new_n_buckets) * sizeof(int32)))
@@ -242,7 +224,7 @@ local function map_type(is_map, key_t, val_t, hash, equal, size_t, HASH_UPPER, C
 			h.flags = new_flags
 			h.n_buckets = new_n_buckets
 			h.n_occupied = h.count
-			h.upper_bound = h.n_buckets * HASH_UPPER + 0.5
+			h.upper_bound = h.n_buckets * UPPER + 0.5
 		end
 		return true
 	end
@@ -449,7 +431,12 @@ khash.type.cstring = {
 	end),
 }
 
-local map_type = function(is_map, key_t, val_t, hash, equal, size_t, HASH_UPPER, C)
+local map_type = function(is_map, key_t, val_t, hash, equal, size_t, UPPER, C)
+	if terralib.type(key_t) == 'table' then
+		local t = key_t
+		key_t, val_t, hash, equal, size_t, UPPER, C =
+			t.key_t, t.val_t, t.hash, t.equal, t.size_t, t.UPPER, C
+	end
 	key_t = key_t or int32
 	val_t = val_t or int32
 	local key_tt = khash.type[key_t]
@@ -466,7 +453,7 @@ local map_type = function(is_map, key_t, val_t, hash, equal, size_t, HASH_UPPER,
 	equal = equal or key_tt and key_tt.equal
 		or key_t:ispointer() and khash.type[int64].equal
 		or khash.type.default.equal
-	HASH_UPPER = HASH_UPPER or 0.77
+	UPPER = UPPER or 0.77
 	--if hash() and/or equal() are terra functions, wrap them into macros
 	--so that we can discard the surplus `env` argument before calling them.
 	if terralib.type(hash) == 'terrafunction' then
@@ -477,19 +464,19 @@ local map_type = function(is_map, key_t, val_t, hash, equal, size_t, HASH_UPPER,
 		local userequal = equal
 		equal = macro(function(k, env) return `userequal(k) end)
 	end
-	C = C or khash.C
-	return map_type(is_map, key_t, val_t, hash, equal, size_t, HASH_UPPER, C)
+	C = C or require'low'
+	return map_type(is_map, key_t, val_t, hash, equal, size_t, UPPER, C)
 end
 
 local function genmacro(is_map)
 	local map_type = function(...) return map_type(is_map, ...) end
 	return macro(
 		--calling it from Terra returns a new map.
-		function(key_t, val_t, hash, equal, size_t, HASH_UPPER)
+		function(key_t, val_t, hash, equal, size_t, UPPER)
 			key_t = key_t and key_t:astype()
 			val_t = val_t and val_t:astype()
 			size_t = size_t and size_t:astype()
-			local map = map_type(key_t, val_t, hash, equal, size_t, HASH_UPPER)
+			local map = map_type(key_t, val_t, hash, equal, size_t, UPPER)
 			return `map(nil)
 		end,
 		--calling it from Lua or from an escape or in a type declaration returns
