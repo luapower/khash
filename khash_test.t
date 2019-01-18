@@ -21,19 +21,19 @@ local test_speed = function(ktype, vtype, gen_key, n, hash, equal, size_t)
 		for i = 0, n do
 			var k = keys[i]
 			var i = h:put(k, 0)
-			assert(h:equal(h:key_at(i), k))
+			assert(h:equal(&h:key_at(i), &k))
 			if i >= 0 then
-				h:val_at(i) = h:val_at(i) + 1
+				inc(h:val_at(i))
 			end
 		end
-		prf('key size: %2d, inserts: %8d, unique keys: %3.0f%%, mil/sec: %8.3f\n',
+		prf('key size: %4d, inserts: %8d, unique keys: %3.0f%%, mil/sec: %8.3f',
 			sizeof(ktype), n, (1.0 * h.count / n) * 100, (n / 1000000.0) / (clock() - t0) )
 
 		t0 = clock()
 		for i = 0, n do
 			assert(h:has(keys[i]))
 		end
-		prf('key size: %2d, lookups: %8d, unique keys: %3.0f%%, mil/sec: %8.3f\n',
+		prf('key size: %4d, lookups: %8d, unique keys: %3.0f%%, mil/sec: %8.3f',
 			sizeof(ktype), n, (1.0 * h.count / n) * 100, (n / 1000000.0) / (clock() - t0) )
 
 		h:free()
@@ -59,43 +59,36 @@ uint64_t hash_64(uint64_t key)
 	key = key + (key << 31);
 	return key;
 }
-]]
+]] --not used (slower than default).
 
 local test_speed_int64 = function(n, u)
 	local gen_key = function(i) return `random(u) end
-	return test_speed(int64, int32, gen_key, n, hash_64)
+	return test_speed(int64, int32, gen_key, n)
 end
 
 local test_speed_int64_large = function(n, u)
 	local gen_key = function(i) return `random(u) end
-	local hash = macro(function(n) return `n end)
-	return test_speed(int64, int32, gen_key, n, hash, nil, int64)
+	return test_speed(int64, int32, gen_key, n, nil, nil, int64)
 end
 
-local hash_fnv_1a = terra(s: &int8, n: int): int32 --FNV-1A
-	var d: uint32 = 0x811C9DC5
-	for i=0,n do
-		d = ((d ^ s[i]) * 16777619) and 0x7fffffff
-	end
-	return d
-end
+includepath'$L/csrc/xxhash'
+include'xxhash.h'
+linklibrary'xxhash'
 
-local test_speed_tuple16 = function(n, u)
-	local T = tuple(int64, int32, float)
+local test_speed_large = function(n, u, size, size_t)
+	local T = struct { a: uint8[size]; }
 	local gen_key = function(i)
 		return quote
 			var key: T
-			key._0 = random(u)
-			key._1 = random(u)
-			key._2 = random(u)
-		in
-			key
+			for i=0,size,8 do
+				key.a[i] = random(u)
+			end
+			in key
 		end
 	end
-	local hash = macro(function(t)
-		return `hash_fnv_1a([&int8](&t), sizeof(T))
-	end)
-	return test_speed(T, int32, gen_key, n)
+	T.methods.__hash32 = macro(function(t) return `XXH32(t, sizeof(T), 0) end)
+	T.methods.__hash64 = macro(function(t) return `XXH64(t, sizeof(T), 0) end)
+	return test_speed(T, int32, gen_key, n, nil, nil, size_t)
 end
 
 local terra test()
@@ -107,15 +100,16 @@ local terra test()
 	h:del(7)
 	assert(not h:has(7))
 	assert(h:get(7, -1) == -1)
-	prf('count: %d\n', h.count)
+	prf('count: %d', h.count)
 	for k,v in h do
-		prf(' %4d -> %4d\n', k, v)
+		prf(' %4d -> %4d', k, v)
 	end
 	h:free()
 
 	[test_speed_int32(1000000, 1000000 * .25)]
 	[test_speed_int64(1000000, 1000000 * .25)]
 	[test_speed_int64_large(1000000, 1000000 * .25)]
-	[test_speed_tuple16(100000, 30)]
+	[test_speed_large(100000, 2, 120, uint32)]
+	[test_speed_large(100000, 2, 120, uint64)]
 end
 test()
