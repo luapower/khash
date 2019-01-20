@@ -21,9 +21,9 @@ local test_speed = function(ktype, vtype, gen_key, n, hash, equal, size_t)
 		for i = 0, n do
 			var k = keys[i]
 			var i = h:put(k, 0)
-			assert(h:equal(&h:key_at(i), &k))
+			assert(h:equal(&h:key_at_index(i), &k))
 			if i >= 0 then
-				inc(h:val_at(i))
+				inc(h:val_at_index(i))
 			end
 		end
 		prf('key size: %4d, inserts: %8d, unique keys: %3.0f%%, mil/sec: %8.3f',
@@ -91,7 +91,7 @@ local test_speed_large = function(n, u, size, size_t)
 	return test_speed(T, int32, gen_key, n, nil, nil, size_t)
 end
 
-local terra test()
+local terra test_speed()
 	var h = map(int32, int32)
 	h:put(6, 7); assert(h:get(6, 0) == 7)
 	h:put(7, 8)
@@ -112,4 +112,5 @@ local terra test()
 	[test_speed_large(100000, 2, 120, uint32)]
 	[test_speed_large(100000, 2, 120, uint64)]
 end
-test()
+
+test_speed()
