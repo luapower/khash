@@ -8,9 +8,9 @@
 
 --[[  API
 
-	local M = map{key_t=, val_t=, hash=key_t.__hash|default,
+	local M = map{key_t=, [val_t=], hash=key_t.__hash|default,
 		equal=val_t.__equal|default, size_t=int, C=require'low'}
-	var m = map(key_t=int, ...) -- preferred variant
+	var m = map(key_t=, ...) -- preferred variant
 	var m: M = nil   -- =nil is important!
 	var m = M(nil)   -- (nil) is important!
 	m:free()
@@ -20,10 +20,11 @@
 	m.count
 
 	m:get_index(k) -> i|-1
-	m:put_key(k) -> khash.PRESENT|ABSENT|DELETED|ERROR, i
+	m:put_key(k) -> m.PRESENT|ABSENT|DELETED|-1, i|-1
 	m:del_at_index(i) -> found?
 	m:has_at_index(i) -> ?
 	m:key_at_index(i) -> k (unchecked!)
+	m:noderef_key_at_index(i) -> k (unchecked!)
 	m:val_at_index(i) -> v (unchecked!)
 	m:eof() -> last_i+1
 	m:next_index([last_i]) -> i|-1
@@ -45,9 +46,6 @@
 ]]
 
 if not ... then require'khash_test'; return end
-
-local khash = {}
-setmetatable(khash, khash)
 
 --ternary operator `?:`.
 local iif = macro(function(cond, t, f)
@@ -93,28 +91,33 @@ local set_isdel_true    = macro(function(flags, i) return setflag_true (flags, i
 local fsize = macro(function(m) return `iif(m < 16, 1, m >> 4) end)
 
 --put_key() return codes.
-khash.PRESENT =  0 --key was already present
-khash.ABSENT  =  1 --key was added
-khash.DELETED =  2 --key was previously deleted
-khash.ERROR   = -1 --allocation error
+local props = {}
+props.PRESENT =  0 --key was already present
+props.ABSENT  =  1 --key was added
+props.DELETED =  2 --key was previously deleted
+props.ERROR   = -1 --allocation error
 
 local UPPER = 0.77
 
-local function map_type(is_map, key_t, val_t, hash, equal, size_t, C)
+local function map_type(key_t, val_t, hash, equal, deref, deref_key_t, size_t, C)
+
+	local is_map = val_t and true or false
+	val_t = val_t or bool --optimized out
 
 	--C dependencies.
 	local realloc = C.realloc
 	local memset = C.memset
 	local free = macro(function(p) return `realloc(p, 0) end)
 
-	hash = hash or C.hash and macro(function(k)
-		return `C.hash(size_t, k, sizeof(key_t))
+	hash = hash or (C.hash and macro(function(k)
+		return `C.hash(size_t, k, sizeof(deref_key_t))
+	end))
+
+	equal = equal or macro(function(k1, k2)
+		return `C.memcmp(k1, k2, sizeof(deref_key_t)) == 0
 	end)
 
-	equal = equal or macro(function(a, b, env)
-		return `C.memcmp(a, b, sizeof(key_t)) == 0
-	end)
-
+	--TODO: wrap this into an opaque struct like dynarray!
 	local map = struct {
 		n_buckets: size_t;
 		count: size_t; --number of elements
@@ -123,7 +126,13 @@ local function map_type(is_map, key_t, val_t, hash, equal, size_t, C)
 		flags: &int32;
 		keys: &key_t;
 		vals: &val_t;
+		userdata: &opaque; --to be used by deref
 	}
+
+	--publish enums as virtual fields of map
+	map.metamethods.__entrymissing = macro(function(k, h)
+		return props[k]
+	end)
 
 	--ctor & dtor
 
@@ -147,20 +156,20 @@ local function map_type(is_map, key_t, val_t, hash, equal, size_t, C)
 		h.n_occupied = 0
 	end
 
+	local pair_size = sizeof(key_t) + (is_map and sizeof(val_t) or 0) + 0.25
 	terra map:__memsize(): size_t
-		return self.n_buckets * (sizeof(key_t) + sizeof(val_t) + 0.25)
+		return self.n_buckets * pair_size
 	end
 
 	--low level (slot-based) API (and the actual algorithm).
-
-	terra map.methods.get_index(h: &map, key: key_t): size_t
+	terra map.methods.get_index(h: &map, key: deref_key_t): size_t
 		if h.n_buckets == 0 then return -1 end
 		var mask: size_t = h.n_buckets - 1
 		var k: size_t = hash(&key)
 		var i: size_t = k and mask
 		var last: size_t = i
 		var step: size_t = 0
-		while not isempty(h.flags, i) and (isdel(h.flags, i) or not equal(h.keys+i, &key)) do
+		while not isempty(h.flags, i) and (isdel(h.flags, i) or not equal(deref(h, h.keys+i), &key)) do
 			step = step + 1
 			i = (i + step) and mask
 			if i == last then return -1 end
@@ -182,10 +191,10 @@ local function map_type(is_map, key_t, val_t, hash, equal, size_t, C)
 			if new_flags == nil then return false end
 			memset(new_flags, 0xaa, fsize(new_n_buckets) * sizeof(int32))
 			if h.n_buckets < new_n_buckets then -- expand
-				var new_keys: &key_t = [&key_t](realloc(h.keys, new_n_buckets * sizeof(key_t)))
+				var new_keys = [&key_t](realloc(h.keys, new_n_buckets * sizeof(key_t)))
 				if new_keys == nil then free(new_flags); return false end
 				if is_map then
-					var new_vals: &val_t = [&val_t](realloc(h.vals, new_n_buckets * sizeof(val_t)))
+					var new_vals = [&val_t](realloc(h.vals, new_n_buckets * sizeof(val_t)))
 					if new_vals == nil then free(new_keys); free(new_flags); return false end
 					h.vals = new_vals
 				end
@@ -202,7 +211,7 @@ local function map_type(is_map, key_t, val_t, hash, equal, size_t, C)
 					if is_map then val = h.vals[j] end
 					set_isdel_true(h.flags, j)
 					while true do -- kick-out process; sort of like in Cuckoo hashing
-						var k: size_t = hash(&key)
+						var k: size_t = hash(deref(h, &key))
 						var i: size_t = k and new_mask
 						var step: size_t = 0
 						while not isempty(new_flags, i) do
@@ -211,8 +220,8 @@ local function map_type(is_map, key_t, val_t, hash, equal, size_t, C)
 						end
 						set_isempty_false(new_flags, i)
 						if i < h.n_buckets and not iseither(h.flags, i) then -- kick out the existing element
-							do var tmp: key_t = h.keys[i]; h.keys[i] = key; key = tmp; end
-							if is_map then var tmp: val_t = h.vals[i]; h.vals[i] = val; val = tmp; end
+							do var tmp = h.keys[i]; h.keys[i] = key; key = tmp; end
+							if is_map then var tmp = h.vals[i]; h.vals[i] = val; val = tmp; end
 							set_isdel_true(h.flags, i) -- mark it as deleted in the old hash table
 						else  -- write the element and jump out of the loop
 							h.keys[i] = key
@@ -254,10 +263,10 @@ local function map_type(is_map, key_t, val_t, hash, equal, size_t, C)
 		if h.n_occupied >= h.upper_bound then -- update the hash table
 			if h.n_buckets > (h.count<<1) then
 				if not h:resize(h.n_buckets - 1) then -- clear "deleted" elements
-					return khash.ERROR, -1
+					return -1, -1
 				end
 			elseif not h:resize(h.n_buckets + 1) then -- expand the hash table
-				return khash.ERROR, -1
+				return -1, -1
 			end
 		end -- TODO: implement automatic shrinking; resize() already supports shrinking
 		var x: size_t
@@ -265,7 +274,7 @@ local function map_type(is_map, key_t, val_t, hash, equal, size_t, C)
 			x = h.n_buckets
 			var site: size_t = x
 			var mask: size_t = x - 1
-			var k: size_t = hash(&key)
+			var k: size_t = hash(deref(h, &key))
 			var i: size_t = k and mask
 			var step: size_t = 0
 			var last: size_t
@@ -273,7 +282,10 @@ local function map_type(is_map, key_t, val_t, hash, equal, size_t, C)
 				x = i -- for speed up
 			else
 				last = i
-				while not isempty(h.flags, i) and (isdel(h.flags, i) or not equal(h.keys+i, &key)) do
+				while not isempty(h.flags, i)
+					and (isdel(h.flags, i)
+						or not equal(deref(h, h.keys+i), deref(h, &key)))
+				do
 					if isdel(h.flags, i) then site = i end
 					step = step + 1
 					i = (i + step) and mask
@@ -288,14 +300,14 @@ local function map_type(is_map, key_t, val_t, hash, equal, size_t, C)
 			h.keys[x] = key
 			set_isboth_false(h.flags, x)
 			h.count = h.count + 1; h.n_occupied = h.n_occupied + 1
-			return khash.ABSENT, x
+			return h.ABSENT, x
 		elseif isdel(h.flags, x) then -- deleted
 			h.keys[x] = key
 			set_isboth_false(h.flags, x)
 			h.count = h.count + 1
-			return khash.DELETED, x
+			return h.DELETED, x
 		else -- present and not deleted
-			return khash.PRESENT, x
+			return h.PRESENT, x
 		end
 	end
 
@@ -312,8 +324,9 @@ local function map_type(is_map, key_t, val_t, hash, equal, size_t, C)
 	map.methods.has_at_index  = macro(function(h, i)
 		return `i >= 0 and i < h.n_buckets and not iseither(h.flags, i)
 	end)
-	map.methods.key_at_index  = macro(function(h, i) return `h.keys[i] end)
+	map.methods.key_at_index  = macro(function(h, i) return `@deref(h, h.keys+i) end)
 	map.methods.val_at_index  = macro(function(h, i) return `h.vals[i] end)
+	map.methods.noderef_key_at_index = macro(function(h, i) return `h.keys[i] end)
 
 	--returns -1 on eof, which is also the start index which can be omitted.
 	map.methods.next_index = macro(function(h, i)
@@ -333,6 +346,26 @@ local function map_type(is_map, key_t, val_t, hash, equal, size_t, C)
 
 	--hi-level (key/value pair-based) API
 
+	terra map.methods.has(h: &map, key: deref_key_t)
+		var i = h:get_index(key)
+		return i ~= -1
+	end
+
+	terra map.methods.at(h: &map, key: deref_key_t): &val_t
+		if not is_map then return nil end
+		var i = h:get_index(key)
+		if i == -1 then return nil end
+		return &h.vals[i]
+	end
+
+	terra map.methods.get(h: &map, key: deref_key_t, default: val_t): val_t
+		if not is_map then return default end
+		var i = h:get_index(key)
+		if i == -1 then return default end
+		return h.vals[i]
+	end
+	map.metamethods.__apply = map.methods.get
+
 	terra map.methods.put(h: &map, key: key_t, val: val_t)
 		var ret, i = h:put_key(key)
 		if i == -1 then return -1 end
@@ -342,32 +375,12 @@ local function map_type(is_map, key_t, val_t, hash, equal, size_t, C)
 
 	terra map.methods.putifnew(h: &map, key: key_t, val: val_t)
 		var ret, i = h:put_key(key)
-		if i == -1 or ret == khash.PRESENT then return -1 end
+		if i == -1 or ret == h.PRESENT then return -1 end
 		if is_map then h.vals[i] = val end
 		return i
 	end
 
-	terra map.methods.has(h: &map, key: key_t)
-		var i = h:get_index(key)
-		return i ~= -1
-	end
-
-	terra map.methods.at(h: &map, key: key_t): &val_t
-		if not is_map then return nil end
-		var i = h:get_index(key)
-		if i == -1 then return nil end
-		return &h.vals[i]
-	end
-
-	terra map.methods.get(h: &map, key: key_t, default: val_t): val_t
-		if not is_map then return default end
-		var i = h:get_index(key)
-		if i == -1 then return default end
-		return h.vals[i]
-	end
-	map.metamethods.__apply = map.methods.get
-
-	terra map.methods.del(h: &map, key: key_t): bool
+	terra map.methods.del(h: &map, key: deref_key_t): bool
 		var i = h:get_index(key)
 		if i == -1 then return false end
 		h:del_at_index(i)
@@ -384,8 +397,9 @@ local function map_type(is_map, key_t, val_t, hash, equal, size_t, C)
 		end
 	end
 
-	map.methods.equal = macro(function(h, a, b) return `equal(a, b) end)
-	map.methods.hash = macro(function(h, e) return `hash(e) end)
+	terra map:equal(k1: &deref_key_t, k2: &deref_key_t)
+		return equal(k1, k2)
+	end
 
 	terra map:merge(m: &map) for k,v in m do self:putifnew(@k,@v) end end
 	terra map:update(m: &map) for k,v in m do self:put(@k,@v) end end
@@ -396,86 +410,72 @@ map_type = terralib.memoize(map_type)
 
 --specialization for different key and value types ---------------------------
 
-khash.type = {}
+local keytype = {}
 
 local direct_cmp = macro(function(a, b) return `@a == @b end)
 local identity_hash = macro(function(n) return `@n end)
 
-khash.type[int32] = {
+keytype[int32] = {
 	hash32 = identity_hash,
 	hash64 = identity_hash,
 	equal = direct_cmp,
 }
-khash.type[uint32] = khash.type[int32]
+keytype[uint32] = keytype[int32]
 
 local K = 2654435769ULL --Knuth's
-khash.type[int64] = {
+keytype[int64] = {
 	hash32 = macro(function(n)
 		return `([int32](@n) * K + [int32](@n >> 32) * K) >> 31
 	end),
 	hash64 = identity_hash,
 	equal = direct_cmp,
 }
-khash.type[uint64] = khash.type[int64]
+keytype[uint64] = keytype[int64]
 
-local function deref_hash(hash)
-	macro(function(self) return `hash(@self) end)
-end
-local function deref_equal(equal)
-	return macro(function(self, v) return `equal(@self, @v) end)
-end
-
-local map_type = function(is_map, key_t, val_t, hash, equal, size_t, C)
-
-	if terralib.type(key_t) == 'table' then
-		local t = key_t
-		key_t, val_t, hash, equal, size_t, C =
-			t.key_t, t.val_t, t.hash, t.equal, t.size_t, C
-	end
-	if not val_t then is_map = true end
-	assert(key_t)
-	assert(val_t)
-	size_t = size_t or int --it's faster to use 64bit hashes for 64bit keys
-	C = C or require'low'
-
-	local dkey_t = key_t:ispointer() and key_t.type or key_t
-
-	local dkey_tt = khash.type[dkey_t]
+local function hash_and_equal(hash, equal, key_t, size_t)
+	local key_tt = keytype[key_t]
 	local hashname = sizeof(size_t) == 8 and 'hash64' or 'hash32'
 
 	hash = hash
-		or dkey_t:isstruct() and dkey_t.methods['__'..hashname]
-		or dkey_tt and dkey_tt[hashname]
+		or key_t:isstruct() and key_t.methods['__'..hashname]
+		or key_tt and key_tt[hashname]
 
 	equal = equal
-		or dkey_t:isstruct() and dkey_t.methods.__equal
-		or dkey_tt and dkey_tt.equal
+		or key_t:isstruct() and key_t.methods.__equal
+		or key_tt and key_tt.equal
 
-	if key_t:ispointer() then --if keys are pointers, compare their values!
-		hash = hash and deref_hash(hash)
-		equal = equal and deref_equal(equal)
+	return hash, equal
+end
+
+local deref_pointer = macro(function(self, k) return `@k end)
+local pass_through = macro(function(self, k) return k end)
+
+local map_type = function(key_t, val_t, hash, equal, deref, deref_key_t, size_t, C)
+	if terralib.type(key_t) == 'table' then
+		local t = key_t
+		key_t, val_t, hash, equal, deref, deref_key_t, size_t, C =
+			t.key_t, t.val_t, t.hash, t.equal, t.deref, t.deref_key_t, t.size_t, C
 	end
-
-	return map_type(is_map, key_t, val_t, hash, equal, size_t, C)
+	assert(key_t)
+	deref_key_t = deref_key_t or (key_t:ispointer() and key_t.type) or key_t
+	deref = deref or (key_t:ispointer() and deref_pointer) or pass_through
+	size_t = size_t or int --it's faster to use 64bit hashes for 64bit keys
+	C = C or require'low'
+	hash, equal = hash_and_equal(hash, equal, deref_key_t, size_t)
+	return map_type(key_t, val_t, hash, equal, deref, deref_key_t, size_t, C)
 end
 
-local function genmacro(is_map)
-	local map_type = function(...) return map_type(is_map, ...) end
-	return macro(
-		--calling it from Terra returns a new map.
-		function(key_t, val_t, hash, equal, size_t)
-			key_t = key_t and key_t:astype()
-			val_t = val_t and val_t:astype()
-			size_t = size_t and size_t:astype()
-			local map = map_type(key_t, val_t, hash, equal, size_t)
-			return `map(nil)
-		end,
-		--calling it from Lua or from an escape or in a type declaration returns
-		--just the type, and you can also pass a custom C namespace.
-		map_type
-	)
-end
-khash.map = genmacro(true)
-khash.set = genmacro(false)
+return macro(
+	--calling it from Terra returns a new map.
+	function(key_t, val_t, hash, equal, deref, deref_key_t, size_t)
+		key_t = key_t and key_t:astype()
+		val_t = val_t and val_t:astype()
+		size_t = size_t and size_t:astype()
+		local map = map_type(key_t, val_t, hash, equal, deref, deref_key_t, size_t)
+		return `map(nil)
+	end,
+	--calling it from Lua or from an escape or in a type declaration returns
+	--just the type, and you can also pass a custom C namespace.
+	map_type
+)
 
-return khash

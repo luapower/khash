@@ -1,8 +1,8 @@
 setfenv(1, require'low')
 
-local random_keys = function(ktype, gen_key, n)
+local random_keys = function(key_t, gen_key, n)
 	return quote
-		var keys = new(ktype, n)
+		var keys = new(key_t, n)
 		for i = 0, n do
 			keys[i] = [gen_key(i)]
 		end
@@ -11,12 +11,13 @@ local random_keys = function(ktype, gen_key, n)
 	end
 end
 
-local test_speed = function(ktype, vtype, gen_key, n, hash, equal, size_t)
+local test_speed = function(key_t, val_t, gen_key, n, hash, equal, size_t)
 	local C = allocs()
 	C.memset = memset
 	return quote
-		var keys = [random_keys(ktype, gen_key, n)]
-		var h: map(ktype, vtype, hash, equal, size_t, nil, C) = {}
+		var keys = [random_keys(key_t, gen_key, n)]
+		var h: map {key_t = key_t, val_t = val_t, hash = hash, equal = equal,
+			size_t = size_t, C = C} = {}
 		var t0 = clock()
 		for i = 0, n do
 			var k = keys[i]
@@ -27,14 +28,14 @@ local test_speed = function(ktype, vtype, gen_key, n, hash, equal, size_t)
 			end
 		end
 		prf('key size: %4d, inserts: %8d, unique keys: %3.0f%%, mil/sec: %8.3f',
-			sizeof(ktype), n, (1.0 * h.count / n) * 100, (n / 1000000.0) / (clock() - t0) )
+			sizeof(key_t), n, (1.0 * h.count / n) * 100, (n / 1000000.0) / (clock() - t0) )
 
 		t0 = clock()
 		for i = 0, n do
 			assert(h:has(keys[i]))
 		end
 		prf('key size: %4d, lookups: %8d, unique keys: %3.0f%%, mil/sec: %8.3f',
-			sizeof(ktype), n, (1.0 * h.count / n) * 100, (n / 1000000.0) / (clock() - t0) )
+			sizeof(key_t), n, (1.0 * h.count / n) * 100, (n / 1000000.0) / (clock() - t0) )
 
 		h:free()
 		free(keys)
@@ -102,7 +103,7 @@ local terra test_speed()
 	assert(h:get(7, -1) == -1)
 	prf('count: %d', h.count)
 	for k,v in h do
-		prf(' %4d -> %4d', k, v)
+		prf(' %4d -> %4d', @k, @v)
 	end
 	h:free()
 
