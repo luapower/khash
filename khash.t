@@ -9,7 +9,7 @@
 --[[  API
 
 	local M = map{key_t=, [val_t=], hash=key_t.__hash|default,
-		equal=val_t.__equal|default, size_t=int, C=require'low'}
+		equal=val_t.__eq|default, size_t=int, C=require'low'}
 	var m = map(key_t=, ...) -- preferred variant
 	var m: M = nil   -- =nil is important!
 	var m = M(nil)   -- (nil) is important!
@@ -136,9 +136,15 @@ local function map_type(key_t, val_t, hash, equal, deref, deref_key_t, size_t, C
 
 	--ctor & dtor
 
+	terra map.methods.init(h: &map)
+		memset(h, 0, sizeof(map))
+	end
+
 	function map.metamethods.__cast(from, to, exp)
-		if from == niltype or from:isunit() then --nil or {}
-			return `map {0, 0, 0, 0, nil, nil, nil}
+		if from == niltype then
+			return quote var m = map{}; m:init() in m end
+		else
+			error'invalid cast'
 		end
 	end
 
@@ -156,9 +162,9 @@ local function map_type(key_t, val_t, hash, equal, deref, deref_key_t, size_t, C
 		h.n_occupied = 0
 	end
 
-	local pair_size = sizeof(key_t) + (is_map and sizeof(val_t) or 0) + 0.25
+	local pair_size = sizeof(key_t) + (is_map and sizeof(val_t) or 0)
 	terra map:__memsize(): size_t
-		return self.n_buckets * pair_size
+		return self.count * pair_size
 	end
 
 	--low level (slot-based) API (and the actual algorithm).
@@ -441,7 +447,7 @@ local function hash_and_equal(hash, equal, key_t, size_t)
 		or key_tt and key_tt[hashname]
 
 	equal = equal
-		or key_t:isstruct() and key_t.methods.__equal
+		or key_t:isstruct() and (key_t.methods.__eq or key_t.metamethods.__eq)
 		or key_tt and key_tt.equal
 
 	return hash, equal
