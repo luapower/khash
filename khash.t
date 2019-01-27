@@ -140,14 +140,6 @@ local function map_type(key_t, val_t, hash, equal, deref, deref_key_t, size_t, C
 		memset(h, 0, sizeof(map))
 	end
 
-	function map.metamethods.__cast(from, to, exp)
-		if from == niltype then
-			return quote var m = map{}; m:init() in m end
-		else
-			error'invalid cast'
-		end
-	end
-
 	terra map.methods.free(h: &map) --can be reused after free
 		free(h.keys)
 		free(h.flags)
@@ -478,7 +470,7 @@ return macro(
 		val_t = val_t and val_t:astype()
 		size_t = size_t and size_t:astype()
 		local map = map_type(key_t, val_t, hash, equal, deref, deref_key_t, size_t)
-		return `map(nil)
+		return quote var m: map; m:init() in m end
 	end,
 	--calling it from Lua or from an escape or in a type declaration returns
 	--just the type, and you can also pass a custom C namespace.
