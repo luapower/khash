@@ -25,14 +25,14 @@ local test_speed = function(key_t, val_t, gen_key, n, hash, equal, size_t)
 				inc(h:val_at_index(i))
 			end
 		end
-		prf('key size: %4d, inserts: %8d, unique keys: %3.0f%%, mil/sec: %8.3f',
+		pfn('key size: %4d, inserts: %8d, unique keys: %3.0f%%, mil/sec: %8.3f',
 			sizeof(key_t), n, (1.0 * h.count / n) * 100, (n / 1000000.0) / (clock() - t0) )
 
 		t0 = clock()
 		for i = 0, n do
 			assert(h:has(keys[i]))
 		end
-		prf('key size: %4d, lookups: %8d, unique keys: %3.0f%%, mil/sec: %8.3f',
+		pfn('key size: %4d, lookups: %8d, unique keys: %3.0f%%, mil/sec: %8.3f',
 			sizeof(key_t), n, (1.0 * h.count / n) * 100, (n / 1000000.0) / (clock() - t0) )
 
 		h:free()
@@ -99,9 +99,9 @@ local terra test_speed()
 	h:del(7)
 	assert(not h:has(7))
 	assert(h:get(7, -1) == -1)
-	prf('count: %d', h.count)
+	pfn('count: %d', h.count)
 	for k,v in h do
-		prf(' %4d -> %4d', @k, @v)
+		pfn(' %4d -> %4d', @k, @v)
 	end
 	h:free()
 
