@@ -128,10 +128,7 @@ local function map_type(key_t, val_t, hash, equal, deref, deref_key_t, size_t, C
 		userdata: &opaque; --to be used by deref
 	}
 
-	local complete = map.complete
-	function map:complete()
-		if self:iscomplete() then return self end
-		complete(self)
+	function map.metamethods:__staticinitialize()
 
 		--publish enums as virtual fields of map
 		map.metamethods.__entrymissing = macro(function(k, h)
@@ -406,8 +403,7 @@ local function map_type(key_t, val_t, hash, equal, deref, deref_key_t, size_t, C
 		terra map:merge(m: &map) for k,v in m do self:putifnew(@k,@v) end end
 		terra map:update(m: &map) for k,v in m do self:put(@k,@v) end end
 
-		return self
-	end --complete()
+	end --__staticinitialize
 
 	return map
 end
