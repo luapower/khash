@@ -128,12 +128,14 @@ local function map_type(key_t, val_t, hash, equal, deref, deref_key_t, size_t, C
 		userdata: &opaque; --to be used by deref
 	}
 
-	function map.metamethods:__staticinitialize()
+	--publish enums as virtual fields of map
+	map.metamethods.__entrymissing = macro(function(k, h)
+		return props[k]
+	end)
 
-		--publish enums as virtual fields of map
-		map.metamethods.__entrymissing = macro(function(k, h)
-			return props[k]
-		end)
+	local added
+	local function addmethods()
+		if added then return end; added = true
 
 		--ctor & dtor
 
@@ -403,7 +405,21 @@ local function map_type(key_t, val_t, hash, equal, deref, deref_key_t, size_t, C
 		terra map:merge(m: &map) for k,v in m do self:putifnew(@k,@v) end end
 		terra map:update(m: &map) for k,v in m do self:put(@k,@v) end end
 
-	end --__staticinitialize
+	end --addmethods()
+
+	function map.metamethods.__getmethod(self, name)
+		addmethods()
+		self.metamethods.__getmethod = nil
+		return self.methods[name]
+	end
+
+	--in case meta-code looks for the presence of a method...
+	local mt = {}; setmetatable(map.methods, mt)
+	function mt:__index(name)
+		addmethods()
+		mt.__index = nil
+		return self[name]
+	end
 
 	return map
 end
