@@ -104,17 +104,14 @@ local function map_type(key_t, val_t, hash, equal, deref, deref_key_t, size_t, C
 	local is_map = val_t and true or false
 	val_t = val_t or bool --optimized out
 
-	--C dependencies.
-	local realloc = C.realloc
-	local memset = C.memset
-	local free = macro(function(p) return `realloc(p, 0) end)
+	setfenv(1, C)
 
 	hash = hash or (C.hash and macro(function(k)
 		return `C.hash(size_t, k, sizeof(deref_key_t))
 	end))
 
 	equal = equal or macro(function(k1, k2)
-		return `C.memcmp(k1, k2, sizeof(deref_key_t)) == 0
+		return `memcmp(k1, k2, sizeof(deref_key_t)) == 0
 	end)
 
 	local map = struct {
@@ -133,9 +130,7 @@ local function map_type(key_t, val_t, hash, equal, deref, deref_key_t, size_t, C
 		return props[k]
 	end)
 
-	local added
-	local function addmethods()
-		if added then return end; added = true
+	addmethods(map, function()
 
 		--ctor & dtor
 
@@ -405,21 +400,7 @@ local function map_type(key_t, val_t, hash, equal, deref, deref_key_t, size_t, C
 		terra map:merge(m: &map) for k,v in m do self:putifnew(@k,@v) end end
 		terra map:update(m: &map) for k,v in m do self:put(@k,@v) end end
 
-	end --addmethods()
-
-	function map.metamethods.__getmethod(self, name)
-		addmethods()
-		self.metamethods.__getmethod = nil
-		return self.methods[name]
-	end
-
-	--in case meta-code looks for the presence of a method...
-	local mt = {}; setmetatable(map.methods, mt)
-	function mt:__index(name)
-		addmethods()
-		mt.__index = nil
-		return self[name]
-	end
+	end) --addmethods()
 
 	return map
 end
