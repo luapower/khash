@@ -90,13 +90,6 @@ local set_isdel_true    = macro(function(flags, i) return setflag_true (flags, i
 
 local fsize = macro(function(m) return `iif(m < 16, 1, m >> 4) end)
 
---put_key() return codes.
-local props = {}
-props.PRESENT =  0 --key was already present
-props.ABSENT  =  1 --key was added
-props.DELETED =  2 --key was previously deleted
-props.ERROR   = -1 --allocation error
-
 local UPPER = 0.77
 
 local function map_type(key_t, val_t, hash, equal, deref, deref_key_t, size_t, C)
@@ -114,7 +107,7 @@ local function map_type(key_t, val_t, hash, equal, deref, deref_key_t, size_t, C
 		return `memcmp(k1, k2, sizeof(deref_key_t)) == 0
 	end)
 
-	local map = struct {
+	local struct map (addproperties) {
 		n_buckets: size_t;
 		count: size_t; --number of elements
 		n_occupied: size_t;
@@ -126,9 +119,10 @@ local function map_type(key_t, val_t, hash, equal, deref, deref_key_t, size_t, C
 	}
 
 	--publish enums as virtual fields of map
-	map.metamethods.__entrymissing = macro(function(k, h)
-		return props[k]
-	end)
+	map.properties.PRESENT =  0 --key was already present
+	map.properties.ABSENT  =  1 --key was added
+	map.properties.DELETED =  2 --key was previously deleted
+	map.properties.ERROR   = -1 --allocation error
 
 	addmethods(map, function()
 
@@ -139,9 +133,9 @@ local function map_type(key_t, val_t, hash, equal, deref, deref_key_t, size_t, C
 		end
 
 		terra map.methods.free(h: &map) --can be reused after free
-			free(h.keys)
-			free(h.flags)
-			free(h.vals)
+			memfree(h.keys)
+			memfree(h.flags)
+			memfree(h.vals)
 			memset(h, 0, sizeof(map))
 		end
 
@@ -435,11 +429,11 @@ local function hash_and_equal(hash, equal, key_t, size_t)
 	local hashname = sizeof(size_t) == 8 and 'hash64' or 'hash32'
 
 	hash = hash
-		or key_t:isstruct() and key_t.methods['__'..hashname]
+		or key_t:isstruct() and key_t:getmethod('__'..hashname)
 		or key_tt and key_tt[hashname]
 
 	equal = equal
-		or key_t:isstruct() and (key_t.methods.__eq or key_t.metamethods.__eq)
+		or key_t:isstruct() and (key_t:getmethod'__eq' or key_t.metamethods.__eq)
 		or key_tt and key_tt.equal
 
 	return hash, equal
