@@ -1,17 +1,14 @@
 
 --Hashmap type for Terra.
 --Written by Cosmin Apreutesei. Public Domain.
+
 --Port of khash.h v0.2.8 from github.com/attractivechaos/klib (MIT License).
 --Copyright (c) 2008, 2009, 2011 by Attractive Chaos <attractor@live.co.uk>.
 
---stdlib deps: realloc, memset, memcmp.
-
 --[[  API
 
-	local M = map{key_t=, [val_t=], hash=key_t.__hash|default,
-		equal=val_t.__eq|default, size_t=int, C=require'low'}
+	local M = map{key_t=,[val_t=],[hash=],[equal=],[size_t=int]}
 	var m = map(key_t=, ...) -- preferred variant
-	var m: M = nil   -- =nil is important!
 	var m = M(nil)   -- (nil) is important!
 	m:free()
 	m:clear()
@@ -37,9 +34,6 @@
 	m:del(k) -> found?
 	for &k,&v in m do ... end
 
-	m:equal(a, b) -> ?
-	m:hash(k) -> hash
-
 	m:merge(m)
 	m:update(m)
 
@@ -47,10 +41,7 @@
 
 if not ... then require'khash_test'; return end
 
---ternary operator `?:`.
-local iif = macro(function(cond, t, f)
-	return quote var v: t:gettype(); if cond then v = t else v = f end in v end
-end)
+setfenv(1, require'low')
 
 --round up a 32bit number to the next number that is a power of 2.
 local roundup32 = macro(function(x)
@@ -92,20 +83,13 @@ local fsize = macro(function(m) return `iif(m < 16, 1, m >> 4) end)
 
 local UPPER = 0.77
 
-local function map_type(key_t, val_t, hash, equal, deref, deref_key_t, size_t, C)
+local function map_type(key_t, val_t, user_hash, user_equal, deref, deref_key_t, size_t)
 
 	local is_map = val_t and true or false
 	val_t = val_t or bool --optimized out
 
-	setfenv(1, C)
-
-	hash = hash or (C.hash and macro(function(k)
-		return `C.hash(size_t, k, sizeof(deref_key_t))
-	end))
-
-	equal = equal or macro(function(k1, k2)
-		return `memcmp(k1, k2, sizeof(deref_key_t)) == 0
-	end)
+	local hash = user_hash or hash
+	local equal = user_equal or equal
 
 	local struct map (addproperties) {
 		n_buckets: size_t;
@@ -155,7 +139,7 @@ local function map_type(key_t, val_t, hash, equal, deref, deref_key_t, size_t, C
 		terra map.methods.get_index(h: &map, key: deref_key_t): size_t
 			if h.n_buckets == 0 then return -1 end
 			var mask: size_t = h.n_buckets - 1
-			var k: size_t = hash(&key)
+			var k: size_t = hash(size_t, &key)
 			var i: size_t = k and mask
 			var last: size_t = i
 			var step: size_t = 0
@@ -201,7 +185,7 @@ local function map_type(key_t, val_t, hash, equal, deref, deref_key_t, size_t, C
 						if is_map then val = h.vals[j] end
 						set_isdel_true(h.flags, j)
 						while true do -- kick-out process; sort of like in Cuckoo hashing
-							var k: size_t = hash(deref(h, &key))
+							var k: size_t = hash(size_t, deref(h, &key))
 							var i: size_t = k and new_mask
 							var step: size_t = 0
 							while not isempty(new_flags, i) do
@@ -264,7 +248,7 @@ local function map_type(key_t, val_t, hash, equal, deref, deref_key_t, size_t, C
 				x = h.n_buckets
 				var site: size_t = x
 				var mask: size_t = x - 1
-				var k: size_t = hash(deref(h, &key))
+				var k: size_t = hash(size_t, deref(h, &key))
 				var i: size_t = k and mask
 				var step: size_t = 0
 				var last: size_t
@@ -387,10 +371,6 @@ local function map_type(key_t, val_t, hash, equal, deref, deref_key_t, size_t, C
 			end
 		end
 
-		terra map:equal(k1: &deref_key_t, k2: &deref_key_t)
-			return equal(k1, k2)
-		end
-
 		terra map:merge(m: &map) for k,v in m do self:putifnew(@k,@v) end end
 		terra map:update(m: &map) for k,v in m do self:put(@k,@v) end end
 
@@ -398,7 +378,7 @@ local function map_type(key_t, val_t, hash, equal, deref, deref_key_t, size_t, C
 
 	return map
 end
-map_type = terralib.memoize(map_type)
+map_type = memoize(map_type)
 
 --specialization for different key and value types ---------------------------
 
@@ -424,37 +404,20 @@ keytype[int64] = {
 }
 keytype[uint64] = keytype[int64]
 
-local function hash_and_equal(hash, equal, key_t, size_t)
-	local key_tt = keytype[key_t]
-	local hashname = sizeof(size_t) == 8 and 'hash64' or 'hash32'
-
-	hash = hash
-		or key_t:isstruct() and key_t:getmethod('__'..hashname)
-		or key_tt and key_tt[hashname]
-
-	equal = equal
-		or key_t:isstruct() and (key_t:getmethod'__eq' or key_t.metamethods.__eq)
-		or key_tt and key_tt.equal
-
-	return hash, equal
-end
-
 local deref_pointer = macro(function(self, k) return `@k end)
 local pass_through = macro(function(self, k) return k end)
 
-local map_type = function(key_t, val_t, hash, equal, deref, deref_key_t, size_t, C)
+local map_type = function(key_t, val_t, hash, equal, deref, deref_key_t, size_t)
 	if terralib.type(key_t) == 'table' then
 		local t = key_t
-		key_t, val_t, hash, equal, deref, deref_key_t, size_t, C =
-			t.key_t, t.val_t, t.hash, t.equal, t.deref, t.deref_key_t, t.size_t, C
+		key_t, val_t, hash, equal, deref, deref_key_t, size_t =
+			t.key_t, t.val_t, t.hash, t.equal, t.deref, t.deref_key_t, t.size_t
 	end
 	assert(key_t)
 	deref_key_t = deref_key_t or (key_t:ispointer() and key_t.type) or key_t
 	deref = deref or (key_t:ispointer() and deref_pointer) or pass_through
 	size_t = size_t or int --it's faster to use 64bit hashes for 64bit keys
-	C = C or require'low'
-	hash, equal = hash_and_equal(hash, equal, deref_key_t, size_t)
-	return map_type(key_t, val_t, hash, equal, deref, deref_key_t, size_t, C)
+	return map_type(key_t, val_t, hash, equal, deref, deref_key_t, size_t)
 end
 
 return macro(
@@ -470,4 +433,3 @@ return macro(
 	--just the type, and you can also pass a custom C namespace.
 	map_type
 )
-

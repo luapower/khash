@@ -75,7 +75,7 @@ include'xxhash.h'
 linklibrary'xxhash'
 
 local test_speed_large = function(n, u, size, size_t)
-	local T = struct { a: uint8[size]; }
+	local struct T { a: uint8[size]; }
 	local gen_key = function(i)
 		return quote
 			var key: T
@@ -85,8 +85,8 @@ local test_speed_large = function(n, u, size, size_t)
 			in key
 		end
 	end
-	T.methods.__hash32 = macro(function(t) return `XXH32(t, sizeof(T), 0) end)
-	T.methods.__hash64 = macro(function(t) return `XXH64(t, sizeof(T), 0) end)
+	terra T:__hash32(d: uint32) return XXH32(self, sizeof(T), d) end
+	terra T:__hash64(d: uint64) return XXH64(self, sizeof(T), d) end
 	return test_speed(T, int32, gen_key, n, nil, nil, size_t)
 end
 
