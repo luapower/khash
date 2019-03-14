@@ -32,9 +32,9 @@
 	m:at(k[,default]) -> &v                     &value for key
 	m[:get](k[,default]) -> v                   value for key
 	m:set(k,v) -> i                             add or update pair
-	m:set(k) -> &v                              add or update key and get &value
+	m:set(k) -> &v                              add key and get &value
 	m:add(k,v) -> i|-1                          add new pair
-	m:add(k) -> &v|nil                          add new pair and get &value
+	m:add(k) -> &v|nil                          add new key and get &value
 	m:del(k) -> found?                          remove pair
 	for &k,&v in m do ... end                   iterate pairs
 
