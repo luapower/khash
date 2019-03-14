@@ -84,8 +84,8 @@ local function map_type(key_t, val_t, user_hash, user_equal, deref, deref_key_t,
 
 	local struct map (gettersandsetters) {
 		n_buckets: size_t;
-		count: size_t; --number of pairs
-		n_occupied: size_t;
+		count: size_t;      --number of pairs
+		n_occupied: size_t; --number of live + deleted pairs
 		upper_bound: size_t;
 		flags: &int32;
 		keys: &key_t;
