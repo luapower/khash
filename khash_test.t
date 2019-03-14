@@ -20,7 +20,6 @@ local test_speed = function(key_t, val_t, gen_key, n, hash, equal, size_t)
 		for i = 0, n do
 			var k = keys[i]
 			var i = h:put(k, 0)
-			assert(h:equal(&h:key_at_index(i), &k))
 			if i >= 0 then
 				inc(h:val_at_index(i))
 			end

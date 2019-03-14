@@ -1,60 +1,51 @@
+--[[
 
---Hashmap type for Terra.
---Written by Cosmin Apreutesei. Public Domain.
+	Hashmap type for Terra.
+	Written by Cosmin Apreutesei. Public Domain.
 
---Port of khash.h v0.2.8 from github.com/attractivechaos/klib (MIT License).
---Copyright (c) 2008, 2009, 2011 by Attractive Chaos <attractor@live.co.uk>.
+	Port of khash.h v0.2.8 from github.com/attractivechaos/klib (MIT License).
 
---[[  API
+	local M = map{key_t=,[val_t=],...}
+	local M = map(key_t,...)
+	var m   = map{key_t=,...}
+	var m   = map(key_t,...)
+	var m = M(nil)
 
-	local M = map{key_t=,[val_t=],[hash=],[equal=],[size_t=int]}
-	var m = map(key_t=, ...) -- preferred variant
-	var m = M(nil)   -- (nil) is important!
-	m:free()
-	m:clear()
-	m:preallocate(size) -> ok?
-	m:shrink() -> ok?
-	m.count
+	m:init()                                    initialize (for struct members)
+	m:free()                                    free the hashmap
+	m:clear()                                   clear but keep the buffers
 
-	m:get_index(k) -> i|-1
-	m:put_key(k) -> m.PRESENT|ABSENT|DELETED|-1, i|-1
-	m:del_at_index(i) -> found?
-	m:has_at_index(i) -> ?
-	m:key_at_index(i) -> k (unchecked!)
-	m:noderef_key_at_index(i) -> k (unchecked!)
-	m:val_at_index(i) -> v (unchecked!)
-	m:eof() -> last_i+1
-	m:next_index([last_i]) -> i|-1
+	m.count                                     (read/only) number of pairs
+	m.capacity                                  (read/write) grow/shrink hashmap
+	m.min_capacity                              (write/only) grow hashmap
 
-	m:has(k) -> ?
-	m:at(k) -> &v|nil
-	m[:get](k, default_v) -> v
-	m:put(k, v) -> i|-1
-	m:putifnew(k, v) -> i|-1
-	m:del(k) -> found?
-	for &k,&v in m do ... end
+	m:index(k[,default]) -> i                   lookup key and return pair index
+	m:put_key(k) -> m.PRESENT|ABSENT|DELETED|-1, i|-1   occupy a key
+	m:del_at_index(i) -> found?                 remove pair
+	m:has_at_index(i) -> found?                 check if index is occupied
+	m:key_at_index(i) -> k                      (unchecked!) get key at i
+	m:noderef_key_at_index(i) -> k              (unchecked!) get no-deref key at i
+	m:val_at_index(i) -> v                      (unchecked!) get value at i
+	m:next_index([last_i]) -> i|-1              next occupied index
 
-	m:merge(m)
-	m:update(m)
+	m:has(k) -> found?                          check if key is in map
+	m:at(k[,default]) -> &v                     &value for key
+	m[:get](k[,default]) -> v                   value for key
+	m:put(k,v) -> i                             put pair
+	m:put(k) -> &v                              put key and get &value
+	m:putifnew(k,v) -> i|-1                     put pair if new
+	m:putifnew(k) -> &v|nil                     put key if doesn't exist and get &value
+	m:del(k) -> found?                          remove pair
+	for &k,&v in m do ... end                   iterate pairs
+
+	m:merge(m)                                  add new pairs from another map
+	m:update(m)                                 update pairs, overriding values
 
 ]]
 
 if not ... then require'khash_test'; return end
 
 setfenv(1, require'low')
-
---round up a 32bit number to the next number that is a power of 2.
-local roundup32 = macro(function(x)
-	return quote
-		x = x - 1
-		x = x or (x >>  1)
-		x = x or (x >>  2)
-		x = x or (x >>  4)
-		x = x or (x >>  8)
-		x = x or (x >> 16)
-		x = x + 1
-	end
-end)
 
 --interface to the 2-bit flags bitmap
 
@@ -91,9 +82,9 @@ local function map_type(key_t, val_t, user_hash, user_equal, deref, deref_key_t,
 	local hash = user_hash or hash
 	local equal = user_equal or equal
 
-	local struct map (addproperties) {
+	local struct map (gettersandsetters) {
 		n_buckets: size_t;
-		count: size_t; --number of elements
+		count: size_t; --number of pairs
 		n_occupied: size_t;
 		upper_bound: size_t;
 		flags: &int32;
@@ -102,30 +93,53 @@ local function map_type(key_t, val_t, user_hash, user_equal, deref, deref_key_t,
 		userdata: &opaque; --to be used by deref
 	}
 
+	map.empty = `map{
+		n_buckets = 0; count = 0; n_occupied = 0; upper_bound = 0;
+		flags = nil; keys = nil; vals = nil; userdata = nil;
+	}
+
+	function map.metamethods.__typename(self)
+		return 'map('..tostring(key_t)..'->'..tostring(val_t)..')'
+	end
+
+	function map.metamethods.__cast(from, to, exp)
+		if to == map then
+			if from == niltype then --makes [map(...)](nil) work in a constant()
+				return map.empty
+			end
+		end
+		assert(false, 'invalid cast from ', from, ' to ', to, ': ', exp)
+	end
+
 	--publish enums as virtual fields of map
+	addproperties(map)
 	map.properties.PRESENT =  0 --key was already present
 	map.properties.ABSENT  =  1 --key was added
 	map.properties.DELETED =  2 --key was previously deleted
 	map.properties.ERROR   = -1 --allocation error
+
+	map.metamethods.__apply = macro(function(self, i, default)
+		if default then return `self:get(i, default) else return `self:get(i) end
+	end)
 
 	addmethods(map, function()
 
 		--ctor & dtor
 
 		terra map.methods.init(h: &map)
-			memset(h, 0, sizeof(map))
+			@h = [map.empty]
 		end
 
 		terra map.methods.free(h: &map) --can be reused after free
-			memfree(h.keys)
-			memfree(h.flags)
-			memfree(h.vals)
-			memset(h, 0, sizeof(map))
+			realloc(h.keys , 0)
+			realloc(h.flags, 0)
+			realloc(h.vals , 0)
+			fill(h)
 		end
 
 		terra map.methods.clear(h: &map)
 			if h.flags == nil then return end
-			memset(h.flags, 0xaa, fsize(h.n_buckets) * sizeof(int32))
+			fill(h.flags, 0xaa, fsize(h.n_buckets))
 			h.count = 0
 			h.n_occupied = 0
 		end
@@ -136,8 +150,10 @@ local function map_type(key_t, val_t, user_hash, user_equal, deref, deref_key_t,
 		end
 
 		--low level (slot-based) API (and the actual algorithm).
-		terra map.methods.get_index(h: &map, key: deref_key_t): size_t
-			if h.n_buckets == 0 then return -1 end
+		map.methods.index = overload'index'
+
+		map.methods.index:adddefinition(terra(h: &map, key: deref_key_t, default: size_t): size_t
+			if h.n_buckets == 0 then return default end
 			var mask: size_t = h.n_buckets - 1
 			var k: size_t = hash(size_t, &key)
 			var i: size_t = k and mask
@@ -146,30 +162,43 @@ local function map_type(key_t, val_t, user_hash, user_equal, deref, deref_key_t,
 			while not isempty(h.flags, i) and (isdel(h.flags, i) or not equal(deref(h, h.keys+i), &key)) do
 				step = step + 1
 				i = (i + step) and mask
-				if i == last then return -1 end
+				if i == last then return default end
 			end
-			return iif(iseither(h.flags, i), -1, i)
-		end
+			return iif(iseither(h.flags, i), default, i)
+		end)
+		map.methods.index:adddefinition(terra(h: &map, key: deref_key_t): size_t
+			var i = h:index(key, -1)
+			assert(i ~= -1)
+			return i
+		end)
 
 		terra map.methods.resize(h: &map, new_n_buckets: size_t): bool
 			-- This function uses 0.25*n_buckets bytes of working space
 			-- instead of (sizeof(key_t+val_t)+.25)*n_buckets.
 			var new_flags: &int32 = nil
 			var j: size_t = 1
-			roundup32(new_n_buckets)
-			if new_n_buckets < 4 then new_n_buckets = 4 end
+			new_n_buckets = max(4, nextpow2(new_n_buckets))
 			if h.count >= [size_t](new_n_buckets * UPPER + 0.5) then
 				j = 0 -- requested size is too small
 			else -- hash table size to be changed (shrink or expand); rehash
-				new_flags = [&int32](realloc(nil, fsize(new_n_buckets) * sizeof(int32)))
-				if new_flags == nil then return false end
-				memset(new_flags, 0xaa, fsize(new_n_buckets) * sizeof(int32))
+				new_flags = alloc(int32, fsize(new_n_buckets))
+				if new_flags == nil then
+					return false
+				end
+				fill(new_flags, 0xaa, fsize(new_n_buckets))
 				if h.n_buckets < new_n_buckets then -- expand
-					var new_keys = [&key_t](realloc(h.keys, new_n_buckets * sizeof(key_t)))
-					if new_keys == nil then free(new_flags); return false end
+					var new_keys = realloc(h.keys, new_n_buckets)
+					if new_keys == nil then
+						realloc(new_flags, 0)
+						return false
+					end
 					if is_map then
-						var new_vals = [&val_t](realloc(h.vals, new_n_buckets * sizeof(val_t)))
-						if new_vals == nil then free(new_keys); free(new_flags); return false end
+						var new_vals = realloc(h.vals, new_n_buckets)
+						if new_vals == nil then
+							realloc(new_keys, 0)
+							realloc(new_flags, 0)
+							return false
+						end
 						h.vals = new_vals
 					end
 					h.keys = new_keys
@@ -194,8 +223,8 @@ local function map_type(key_t, val_t, user_hash, user_equal, deref, deref_key_t,
 							end
 							set_isempty_false(new_flags, i)
 							if i < h.n_buckets and not iseither(h.flags, i) then -- kick out the existing element
-								do var tmp = h.keys[i]; h.keys[i] = key; key = tmp; end
-								if is_map then var tmp = h.vals[i]; h.vals[i] = val; val = tmp; end
+								swap(h.keys[i], key)
+								if is_map then swap(h.vals[i], val) end
 								set_isdel_true(h.flags, i) -- mark it as deleted in the old hash table
 							else  -- write the element and jump out of the loop
 								h.keys[i] = key
@@ -207,16 +236,23 @@ local function map_type(key_t, val_t, user_hash, user_equal, deref, deref_key_t,
 					j = j + 1
 				end
 				if h.n_buckets > new_n_buckets then -- shrink the hash table
-					var new_keys = [&key_t](realloc(h.keys, new_n_buckets * sizeof(key_t)))
-					if new_keys == nil then free(new_flags); return false end
+					var new_keys = realloc(h.keys, new_n_buckets)
+					if new_keys == nil then
+						realloc(new_flags, 0)
+						return false
+					end
 					if is_map then
-						var new_vals = [&val_t](realloc(h.vals, new_n_buckets * sizeof(val_t)))
-						if new_vals == nil then free(new_keys); free(new_flags); return false end
+						var new_vals = realloc(h.vals, new_n_buckets)
+						if new_vals == nil then
+							realloc(new_keys, 0)
+							realloc(new_flags, 0)
+							return false
+						end
 						h.vals = new_vals
 					end
 					h.keys = new_keys
 				end
-				free(h.flags) -- free the working space
+				realloc(h.flags, 0) -- free the working space
 				h.flags = new_flags
 				h.n_buckets = new_n_buckets
 				h.n_occupied = h.count
@@ -225,12 +261,14 @@ local function map_type(key_t, val_t, user_hash, user_equal, deref, deref_key_t,
 			return true
 		end
 
-		terra map.methods.preallocate(h: &map, n_buckets: size_t)
-			return iif(n_buckets > h.n_buckets, h:resize(n_buckets), true)
+		map.methods.get_capacity = macro(function(self) return `self.n_buckets end)
+
+		terra map.methods.set_capacity(h: &map, n_buckets: size_t)
+			return h:resize(max(h.count, n_buckets))
 		end
 
-		terra map.methods.shrink(h: &map)
-			return h:resize(h.count)
+		terra map.methods.set_min_capacity(h: &map, n_buckets: size_t)
+			assert(h:resize(max(h.n_buckets, n_buckets)))
 		end
 
 		terra map.methods.put_key(h: &map, key: key_t): {int8, size_t}
@@ -294,12 +332,11 @@ local function map_type(key_t, val_t, user_hash, user_equal, deref, deref_key_t,
 			return false
 		end
 
-		map.methods.eof           = macro(function(h) return `h.n_buckets end)
-		map.methods.has_at_index  = macro(function(h, i)
+		map.methods.has_at_index = macro(function(h, i)
 			return `i >= 0 and i < h.n_buckets and not iseither(h.flags, i)
 		end)
-		map.methods.key_at_index  = macro(function(h, i) return `@deref(h, h.keys+i) end)
-		map.methods.val_at_index  = macro(function(h, i) return `h.vals[i] end)
+		map.methods.key_at_index = macro(function(h, i) return `@deref(h, h.keys+i) end)
+		map.methods.val_at_index = macro(function(h, i) return `h.vals[i] end)
 		map.methods.noderef_key_at_index = macro(function(h, i) return `h.keys[i] end)
 
 		--returns -1 on eof, which is also the start index which can be omitted.
@@ -308,10 +345,11 @@ local function map_type(key_t, val_t, user_hash, user_equal, deref, deref_key_t,
 			return quote
 				var r: size_t = -1
 				var i: size_t = i
-				while i < h:eof() do
+				while i < h.n_buckets do
 					i = i + 1
 					if h:has_at_index(i) then
-						r = i; break
+						r = i
+						break
 					end
 				end
 				in r
@@ -321,58 +359,98 @@ local function map_type(key_t, val_t, user_hash, user_equal, deref, deref_key_t,
 		--hi-level (key/value pair-based) API
 
 		terra map.methods.has(h: &map, key: deref_key_t)
-			var i = h:get_index(key)
-			return i ~= -1
+			return h:index(key, -1) ~= -1
 		end
 
-		terra map.methods.at(h: &map, key: deref_key_t): &val_t
-			if not is_map then return nil end
-			var i = h:get_index(key)
-			if i == -1 then return nil end
-			return &h.vals[i]
-		end
+		if is_map then
+			map.methods.at = overload'at'
+			map.methods.at:adddefinition(terra(h: &map, key: deref_key_t, default: &val_t): &val_t
+				var i = h:index(key, -1)
+				return iif(i ~= -1, &h.vals[i], default)
+			end)
+			map.methods.at:adddefinition(terra(h: &map, key: deref_key_t): &val_t
+				return &h.vals[h:index(key)]
+			end)
 
-		terra map.methods.get(h: &map, key: deref_key_t, default: val_t): val_t
-			if not is_map then return default end
-			var i = h:get_index(key)
-			if i == -1 then return default end
-			return h.vals[i]
-		end
-		map.metamethods.__apply = map.methods.get
+			map.methods.get = overload'get'
+			map.methods.get:adddefinition(terra(h: &map, key: deref_key_t, default: val_t): val_t
+				var i = h:index(key, -1)
+				return iif(i ~= -1, h.vals[i], default)
+			end)
+			map.methods.get:adddefinition(terra(h: &map, key: deref_key_t): val_t
+				return h.vals[h:index(key)]
+			end)
 
-		terra map.methods.put(h: &map, key: key_t, val: val_t)
-			var ret, i = h:put_key(key)
-			if i == -1 then return -1 end
-			if is_map then h.vals[i] = val end
-			return i
-		end
+			map.methods.put = overload'put'
+			map.methods.put:adddefinition(terra(h: &map, key: key_t, val: val_t)
+				var ret, i = h:put_key(key); assert(i ~= -1)
+				h.vals[i] = val
+				return i
+			end)
+			map.methods.put:adddefinition(terra(h: &map, key: key_t)
+				var ret, i = h:put_key(key); assert(i ~= -1)
+				return &h.vals[i]
+			end)
 
-		terra map.methods.putifnew(h: &map, key: key_t, val: val_t)
-			var ret, i = h:put_key(key)
-			if i == -1 or ret == h.PRESENT then return -1 end
-			if is_map then h.vals[i] = val end
-			return i
+			map.methods.putifnew = overload'putifnew'
+			map.methods.putifnew:adddefinition(terra(h: &map, key: key_t, val: val_t)
+				var ret, i = h:put_key(key); assert(i ~= -1)
+				if ret ~= h.PRESENT then
+					h.vals[i] = val
+					return -1
+				end
+				return i
+			end)
+			map.methods.putifnew:adddefinition(terra(h: &map, key: key_t)
+				var ret, i = h:put_key(key); assert(i ~= -1)
+				return iif(ret ~= h.PRESENT, &h.vals[i], nil)
+			end)
+		else
+			terra map.methods.put(h: &map, key: key_t)
+				var _, i = h:put_key(key); assert(i ~= -1)
+				return i
+			end
+
+			terra map.methods.putifnew(h: &map, key: key_t)
+				var ret, i = h:put_key(key); assert(i ~= -1)
+				return iif(ret ~= h.PRESENT, i, -1)
+			end
 		end
 
 		terra map.methods.del(h: &map, key: deref_key_t): bool
-			var i = h:get_index(key)
+			var i = h:index(key, -1)
 			if i == -1 then return false end
 			h:del_at_index(i)
 			return true
 		end
 
 		function map.metamethods.__for(h, body)
-			return quote
-				for i = 0, h:eof() do
-					if h:has_at_index(i) then
-						[ body(`&h.keys[i], `iif(is_map, &h.vals[i], nil)) ]
+			if is_map then
+				return quote
+					for i = 0, h.n_buckets do
+						if h:has_at_index(i) then
+							[ body(`&h.keys[i], `&h.vals[i]) ]
+						end
+					end
+				end
+			else
+				return quote
+					for i = 0, h.n_buckets do
+						if h:has_at_index(i) then
+							[ body(`&h.keys[i]) ]
+						end
 					end
 				end
 			end
 		end
 
-		terra map:merge(m: &map) for k,v in m do self:putifnew(@k,@v) end end
-		terra map:update(m: &map) for k,v in m do self:put(@k,@v) end end
+		if is_map then
+			terra map:merge(m: &map) for k,v in m do self:putifnew(@k,@v) end end
+			terra map:update(m: &map) for k,v in m do self:put(@k,@v) end end
+		else
+			terra map:merge(m: &map) for k in m do self:putifnew(@k) end end
+			terra map:update(m: &map) for k in m do self:put(@k) end end
+		end
 
 	end) --addmethods()
 
@@ -413,7 +491,7 @@ local map_type = function(key_t, val_t, hash, equal, deref, deref_key_t, size_t)
 		key_t, val_t, hash, equal, deref, deref_key_t, size_t =
 			t.key_t, t.val_t, t.hash, t.equal, t.deref, t.deref_key_t, t.size_t
 	end
-	assert(key_t)
+	assert(key_t, 'key type missing')
 	deref_key_t = deref_key_t or (key_t:ispointer() and key_t.type) or key_t
 	deref = deref or (key_t:ispointer() and deref_pointer) or pass_through
 	size_t = size_t or int --it's faster to use 64bit hashes for 64bit keys
