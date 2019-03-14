@@ -19,7 +19,7 @@ local test_speed = function(key_t, val_t, gen_key, n, hash, equal, size_t)
 		var t0 = clock()
 		for i = 0, n do
 			var k = keys[i]
-			var i = h:put(k, 0)
+			var i = h:set(k, 0)
 			if i >= 0 then
 				inc(h:val_at_index(i))
 			end
@@ -91,9 +91,9 @@ end
 
 local terra test_speed()
 	var h = map(int32, int32)
-	h:put(6, 7); assert(h:get(6, 0) == 7)
-	h:put(7, 8)
-	h:put(12, 13)
+	h:set(6, 7); assert(h:get(6, 0) == 7)
+	h:set(7, 8)
+	h:set(12, 13)
 	assert(h:has(12))
 	h:del(7)
 	assert(not h:has(7))

@@ -20,7 +20,7 @@
 	m.min_capacity                              (write/only) grow hashmap
 
 	m:index(k[,default]) -> i                   lookup key and return pair index
-	m:put_key(k) -> m.PRESENT|ABSENT|DELETED|-1, i|-1   occupy a key
+	m:setkey(k) -> m.PRESENT|ABSENT|DELETED|-1, i|-1   occupy a key
 	m:del_at_index(i) -> found?                 remove pair
 	m:has_at_index(i) -> found?                 check if index is occupied
 	m:key_at_index(i) -> k                      (unchecked!) get key at i
@@ -31,10 +31,10 @@
 	m:has(k) -> found?                          check if key is in map
 	m:at(k[,default]) -> &v                     &value for key
 	m[:get](k[,default]) -> v                   value for key
-	m:put(k,v) -> i                             put pair
-	m:put(k) -> &v                              put key and get &value
-	m:putifnew(k,v) -> i|-1                     put pair if new
-	m:putifnew(k) -> &v|nil                     put key if doesn't exist and get &value
+	m:set(k,v) -> i                             add or update pair
+	m:set(k) -> &v                              add or update key and get &value
+	m:add(k,v) -> i|-1                          add new pair
+	m:add(k) -> &v|nil                          add new pair and get &value
 	m:del(k) -> found?                          remove pair
 	for &k,&v in m do ... end                   iterate pairs
 
@@ -271,7 +271,7 @@ local function map_type(key_t, val_t, user_hash, user_equal, deref, deref_key_t,
 			assert(h:resize(max(h.n_buckets, n_buckets)))
 		end
 
-		terra map.methods.put_key(h: &map, key: key_t): {int8, size_t}
+		terra map.methods.setkey(h: &map, key: key_t): {int8, size_t}
 			if h.n_occupied >= h.upper_bound then -- update the hash table
 				if h.n_buckets > (h.count<<1) then
 					if not h:resize(h.n_buckets - 1) then -- clear "deleted" elements
@@ -381,38 +381,38 @@ local function map_type(key_t, val_t, user_hash, user_equal, deref, deref_key_t,
 				return h.vals[h:index(key)]
 			end)
 
-			map.methods.put = overload'put'
-			map.methods.put:adddefinition(terra(h: &map, key: key_t, val: val_t)
-				var ret, i = h:put_key(key); assert(i ~= -1)
+			map.methods.set = overload'set'
+			map.methods.set:adddefinition(terra(h: &map, key: key_t, val: val_t)
+				var ret, i = h:setkey(key); assert(i ~= -1)
 				h.vals[i] = val
 				return i
 			end)
-			map.methods.put:adddefinition(terra(h: &map, key: key_t)
-				var ret, i = h:put_key(key); assert(i ~= -1)
+			map.methods.set:adddefinition(terra(h: &map, key: key_t)
+				var ret, i = h:setkey(key); assert(i ~= -1)
 				return &h.vals[i]
 			end)
 
-			map.methods.putifnew = overload'putifnew'
-			map.methods.putifnew:adddefinition(terra(h: &map, key: key_t, val: val_t)
-				var ret, i = h:put_key(key); assert(i ~= -1)
+			map.methods.add = overload'add'
+			map.methods.add:adddefinition(terra(h: &map, key: key_t, val: val_t)
+				var ret, i = h:setkey(key); assert(i ~= -1)
 				if ret ~= h.PRESENT then
 					h.vals[i] = val
 					return -1
 				end
 				return i
 			end)
-			map.methods.putifnew:adddefinition(terra(h: &map, key: key_t)
-				var ret, i = h:put_key(key); assert(i ~= -1)
+			map.methods.add:adddefinition(terra(h: &map, key: key_t)
+				var ret, i = h:setkey(key); assert(i ~= -1)
 				return iif(ret ~= h.PRESENT, &h.vals[i], nil)
 			end)
 		else
-			terra map.methods.put(h: &map, key: key_t)
-				var _, i = h:put_key(key); assert(i ~= -1)
+			terra map.methods.set(h: &map, key: key_t)
+				var _, i = h:setkey(key); assert(i ~= -1)
 				return i
 			end
 
-			terra map.methods.putifnew(h: &map, key: key_t)
-				var ret, i = h:put_key(key); assert(i ~= -1)
+			terra map.methods.add(h: &map, key: key_t)
+				var ret, i = h:setkey(key); assert(i ~= -1)
 				return iif(ret ~= h.PRESENT, i, -1)
 			end
 		end
@@ -445,11 +445,11 @@ local function map_type(key_t, val_t, user_hash, user_equal, deref, deref_key_t,
 		end
 
 		if is_map then
-			terra map:merge(m: &map) for k,v in m do self:putifnew(@k,@v) end end
-			terra map:update(m: &map) for k,v in m do self:put(@k,@v) end end
+			terra map:merge(m: &map) for k,v in m do self:add(@k,@v) end end
+			terra map:update(m: &map) for k,v in m do self:set(@k,@v) end end
 		else
-			terra map:merge(m: &map) for k in m do self:putifnew(@k) end end
-			terra map:update(m: &map) for k in m do self:put(@k) end end
+			terra map:merge(m: &map) for k in m do self:add(@k) end end
+			terra map:update(m: &map) for k in m do self:set(@k) end end
 		end
 
 	end) --addmethods()
