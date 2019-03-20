@@ -145,7 +145,7 @@ local function map_type(key_t, val_t, user_hash, user_equal, deref, deref_key_t,
 		end
 
 		local pair_size = sizeof(key_t) + (is_map and sizeof(val_t) or 0)
-		terra map:__memsize(): size_t
+		terra map:__memsize(): intptr
 			return self.count * pair_size
 		end
 
