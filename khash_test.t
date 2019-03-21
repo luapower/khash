@@ -15,7 +15,7 @@ local test_speed = function(key_t, val_t, gen_key, n, hash, equal, size_t)
 	return quote
 		var keys = [random_keys(key_t, gen_key, n)]
 		var h: map {key_t = key_t, val_t = val_t, hash = hash, equal = equal,
-			size_t = size_t, C = C}; h:init()
+			size_t = size_t}; h:init()
 		var t0 = clock()
 		for i = 0, n do
 			var k = keys[i]
@@ -69,8 +69,7 @@ local test_speed_int64_large = function(n, u)
 	return test_speed(int64, int32, gen_key, n, nil, nil, int64)
 end
 
-includepath'$L/csrc/xxhash'
-include'xxhash.h'
+require_h'xxhash_h'
 linklibrary'xxhash'
 
 local test_speed_large = function(n, u, size, size_t)

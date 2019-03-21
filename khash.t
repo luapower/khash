@@ -5,11 +5,10 @@
 
 	Port of khash.h v0.2.8 from github.com/attractivechaos/klib (MIT License).
 
-	local M = map{key_t=,[val_t=],...}
-	local M = map(key_t,...)
-	var m   = map{key_t=,...}
-	var m   = map(key_t,...)
-	var m = M(nil)
+	local M = map(key_t,[val_t],[size_t=int])   create a map type
+	local M = map{key_t=,...}                   create a map_type
+	var m   = map(key_t,[val_t],[size_t=int])   create a map object
+	var m   = M(nil)                            nil-cast (for use in global())
 
 	m:init()                                    initialize (for struct members)
 	m:free()                                    free the hashmap
@@ -74,12 +73,15 @@ local fsize = macro(function(m) return `iif(m < 16, 1, m >> 4) end)
 
 local UPPER = 0.77
 
-local function map_type(key_t, val_t, user_hash, user_equal, deref, deref_key_t, size_t)
+local function map_type(
+	key_t, val_t, user_hash, user_equal, size_t,
+	deref, deref_key_t, state_t
+)
 
 	local is_map = val_t and true or false
-	val_t = val_t or bool --optimized out
+	val_t = val_t or tuple() --optimized out
 
-	local hash = user_hash or hash
+	local hash  = user_hash  or hash
 	local equal = user_equal or equal
 
 	local struct map (gettersandsetters) {
@@ -90,16 +92,37 @@ local function map_type(key_t, val_t, user_hash, user_equal, deref, deref_key_t,
 		flags: &int32;
 		keys: &key_t;
 		vals: &val_t;
-		userdata: &opaque; --to be used by deref
+		state: state_t; --to be used by deref
 	}
 
+	local st = state_t.empty
+	st = st or state_t:ispointer() and `nil
+	st = st or state_t:isarithmetic() and 0
+	st = st or state_t:istuple() and `{}
+	assert(st, 'state missing initializer')
+
+	map.key_t   = key_t
+	map.val_t   = val_t
+	map.size_t  = size_t
+	map.state_t = state_t
+
 	map.empty = `map{
-		n_buckets = 0; count = 0; n_occupied = 0; upper_bound = 0;
-		flags = nil; keys = nil; vals = nil; userdata = nil;
+		n_buckets = 0;
+		count = 0;
+		n_occupied = 0;
+		upper_bound = 0;
+		flags = nil;
+		keys = nil;
+		vals = nil;
+		state = st;
 	}
 
 	function map.metamethods.__typename(self)
-		return 'map('..tostring(key_t)..'->'..tostring(val_t)..')'
+		if is_map then
+			return 'map('..tostring(key_t)..'->'..tostring(val_t)..')'
+		else
+			return 'set('..tostring(key_t)..')'
+		end
 	end
 
 	function map.metamethods.__cast(from, to, exp)
@@ -462,13 +485,11 @@ map_type = memoize(map_type)
 
 local keytype = {}
 
-local direct_cmp = macro(function(a, b) return `@a == @b end)
 local identity_hash = macro(function(n) return `@n end)
 
 keytype[int32] = {
 	hash32 = identity_hash,
 	hash64 = identity_hash,
-	equal = direct_cmp,
 }
 keytype[uint32] = keytype[int32]
 
@@ -478,34 +499,38 @@ keytype[int64] = {
 		return `([int32](@n) * K + [int32](@n >> 32) * K) >> 31
 	end),
 	hash64 = identity_hash,
-	equal = direct_cmp,
 }
 keytype[uint64] = keytype[int64]
 
 local deref_pointer = macro(function(self, k) return `@k end)
 local pass_through = macro(function(self, k) return k end)
 
-local map_type = function(key_t, val_t, hash, equal, deref, deref_key_t, size_t)
+local map_type = function(key_t, val_t, size_t)
+	local hash, equal, deref, deref_key_t, state_t
 	if terralib.type(key_t) == 'table' then
 		local t = key_t
-		key_t, val_t, hash, equal, deref, deref_key_t, size_t =
-			t.key_t, t.val_t, t.hash, t.equal, t.deref, t.deref_key_t, t.size_t
+		key_t, val_t, size_t = t.key_t, t.val_t, t.size_t
+		hash, equal, deref, deref_key_t, state_t =
+			t.hash, t.equal, t.deref, t.deref_key_t, t.state_t
 	end
 	assert(key_t, 'key type missing')
 	deref_key_t = deref_key_t or (key_t:ispointer() and key_t.type) or key_t
 	deref = deref or (key_t:ispointer() and deref_pointer) or pass_through
 	size_t = size_t or int --it's faster to use 64bit hashes for 64bit keys
-	return map_type(key_t, val_t, hash, equal, deref, deref_key_t, size_t)
+	state_t = state_t or tuple()
+	return map_type(
+		key_t, val_t, hash, equal, size_t,
+		deref, deref_key_t, state_t)
 end
 
 return macro(
 	--calling it from Terra returns a new map.
-	function(key_t, val_t, hash, equal, deref, deref_key_t, size_t)
+	function(key_t, val_t, size_t)
 		key_t = key_t and key_t:astype()
 		val_t = val_t and val_t:astype()
 		size_t = size_t and size_t:astype()
-		local map = map_type(key_t, val_t, hash, equal, deref, deref_key_t, size_t)
-		return quote var m: map; m:init() in m end
+		local map = map_type(key_t, val_t, size_t)
+		return `map(nil)
 	end,
 	--calling it from Lua or from an escape or in a type declaration returns
 	--just the type, and you can also pass a custom C namespace.
