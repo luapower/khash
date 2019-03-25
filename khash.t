@@ -182,8 +182,10 @@ local function map_type(
 			var i: size_t = k and mask
 			var last: size_t = i
 			var step: size_t = 0
-			while not isempty(h.flags, i) and (isdel(h.flags, i) or not equal(deref(h, h.keys+i), &key)) do
-				step = step + 1
+			while not isempty(h.flags, i) and (isdel(h.flags, i)
+				or not equal(deref(h, h.keys+i), &key))
+			do
+				inc(step)
 				i = (i + step) and mask
 				if i == last then return default end
 			end
@@ -241,22 +243,23 @@ local function map_type(
 							var i: size_t = k and new_mask
 							var step: size_t = 0
 							while not isempty(new_flags, i) do
-								step = step + 1
+								inc(step)
 								i = (i + step) and new_mask
 							end
 							set_isempty_false(new_flags, i)
-							if i < h.n_buckets and not iseither(h.flags, i) then -- kick out the existing element
+							if i < h.n_buckets and not iseither(h.flags, i) then
+								-- kick out the existing element
 								swap(h.keys[i], key)
 								if is_map then swap(h.vals[i], val) end
 								set_isdel_true(h.flags, i) -- mark it as deleted in the old hash table
-							else  -- write the element and jump out of the loop
+							else -- write the element and jump out of the loop
 								h.keys[i] = key
 								if is_map then h.vals[i] = val end
 								break
 							end
 						end
 					end
-					j = j + 1
+					inc(j)
 				end
 				if h.n_buckets > new_n_buckets then -- shrink the hash table
 					var new_keys = realloc(h.keys, new_n_buckets)
@@ -296,7 +299,7 @@ local function map_type(
 
 		terra map.methods.setkey(h: &map, key: key_t): {int8, size_t}
 			if h.n_occupied >= h.upper_bound then -- update the hash table
-				if h.n_buckets > (h.count<<1) then
+				if h.n_buckets > h.count * 2 then
 					if not h:resize(h.n_buckets - 1) then -- clear "deleted" elements
 						return -1, -1
 					end
@@ -304,42 +307,39 @@ local function map_type(
 					return -1, -1
 				end
 			end -- TODO: implement automatic shrinking; resize() already supports shrinking
-			var x: size_t
-			do
-				x = h.n_buckets
-				var site: size_t = x
-				var mask: size_t = x - 1
-				var k: size_t = hash(size_t, deref(h, &key))
-				var i: size_t = k and mask
+			var x = h.n_buckets
+			var site = x
+			var mask = x - 1
+			var k = hash(size_t, deref(h, &key))
+			var i = k and mask
+			if isempty(h.flags, i) then
+				x = i -- for speed up
+			else
 				var step: size_t = 0
-				var last: size_t
-				if isempty(h.flags, i) then
-					x = i -- for speed up
-				else
-					last = i
-					while not isempty(h.flags, i)
-						and (isdel(h.flags, i)
-							or not equal(deref(h, h.keys+i), deref(h, &key)))
-					do
-						if isdel(h.flags, i) then site = i end
-						step = step + 1
-						i = (i + step) and mask
-						if i == last then x = site; break; end
-					end
-					if x == h.n_buckets then
-						x = iif(isempty(h.flags, i) and site ~= h.n_buckets, site, i)
-					end
+				var last = i
+				while not isempty(h.flags, i)
+					and (isdel(h.flags, i)
+						or not equal(deref(h, h.keys+i), deref(h, &key)))
+				do
+					if isdel(h.flags, i) then site = i end
+					inc(step)
+					i = (i + step) and mask
+					if i == last then x = site; break; end
+				end
+				if x == h.n_buckets then
+					x = iif(isempty(h.flags, i) and site ~= h.n_buckets, site, i)
 				end
 			end
 			if isempty(h.flags, x) then -- not present at all
 				h.keys[x] = key
 				set_isboth_false(h.flags, x)
-				h.count = h.count + 1; h.n_occupied = h.n_occupied + 1
+				inc(h.count)
+				inc(h.n_occupied)
 				return h.ABSENT, x
 			elseif isdel(h.flags, x) then -- deleted
 				h.keys[x] = key
 				set_isboth_false(h.flags, x)
-				h.count = h.count + 1
+				inc(h.count)
 				return h.DELETED, x
 			else -- present and not deleted
 				return h.PRESENT, x
@@ -369,7 +369,7 @@ local function map_type(
 				var r: size_t = -1
 				var i: size_t = i
 				while i < h.n_buckets do
-					i = i + 1
+					inc(i)
 					if h:has_at_index(i) then
 						r = i
 						break
@@ -475,6 +475,10 @@ local function map_type(
 			terra map:update(m: &map) for k in m do self:set(@k) end end
 		end
 
+		setinlined(map.methods, function(name)
+			return name ~= 'resize'
+		end)
+
 	end) --addmethods()
 
 	return map
@@ -523,7 +527,7 @@ local map_type = function(key_t, val_t, size_t)
 		deref, deref_key_t, state_t)
 end
 
-return macro(
+low.map = macro(
 	--calling it from Terra returns a new map.
 	function(key_t, val_t, size_t)
 		key_t = key_t and key_t:astype()

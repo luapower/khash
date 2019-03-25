@@ -2,7 +2,7 @@ setfenv(1, require'low')
 
 local random_keys = function(key_t, gen_key, n)
 	return quote
-		var keys = new(key_t, n)
+		var keys = alloc(key_t, n)
 		for i = 0, n do
 			keys[i] = [gen_key(i)]
 		end
