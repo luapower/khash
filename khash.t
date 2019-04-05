@@ -5,40 +5,52 @@
 
 	Port of khash.h v0.2.8 from github.com/attractivechaos/klib (MIT License).
 
-	local M = map(key_t,[val_t],[size_t=int])   create a map type
-	local M = map{key_t=,...}                   create a map_type
-	var m   = map(key_t,[val_t],[size_t=int])   create a map object
+	local M = map(key_t,val_t,[size_t=int])     create a map type
+	local M = map{key_t=,val_t=...}             create a map type
+	var m   = map(key_t,val_t,[size_t=int])     create a map object
 	var m   = M(nil)                            nil-cast (for use in global())
 
-	m:init()                                    initialize (for struct members)
-	m:free()                                    free the hashmap
-	m:clear()                                   clear but keep the buffers
+	local S = set(key_t,[size_t=int])           create a set type
+	local S = set{key_t=,...}                   create a set type
+	var s   = set(key_t,[size_t=int])           create a set object
+	var s   = S(nil)                            nil-cast (for use in global())
 
-	m.count                                     (read/only) number of pairs
-	m.capacity                                  (read/write) grow/shrink hashmap
-	m.min_capacity                              (write/only) grow hashmap
+	m|s:init() | fill(&m|&s)                    initialize (for struct members)
+	m|s:free()                                  free the hashmap
+	m|s:clear()                                 clear but keep the buffers
 
-	m:index(k[,default]) -> i                   lookup key and return pair index
-	m:setkey(k) -> m.PRESENT|ABSENT|DELETED|-1, i|-1   occupy a key
-	m:del_at_index(i) -> found?                 remove pair
-	m:has_at_index(i) -> found?                 check if index is occupied
-	m:key_at_index(i) -> k                      (unchecked!) get key at i
-	m:noderef_key_at_index(i) -> k              (unchecked!) get no-deref key at i
+	m|s.count                                   (read/only) number of pairs
+	m|s.capacity                                (read/write) grow/shrink hashmap
+	m|s.min_capacity                            (write/only) grow hashmap
+
+	m|s.noown_keys                              (read/write) doesn't own the keys
+	m.noown_vals                                (read/write) doesn't own the values
+
+	m|s:index(k[,default]) -> i                 lookup key and return pair index
+	m|s:setkey(k) -> m.PRESENT|ABSENT|DELETED|-1, i|-1  occupy a key
+	m|s:remove_at_index(i) -> found?            remove/free pair at i
+	m|s:has_at_index(i) -> found?               check if index is occupied
+	m|s:key_at_index(i) -> k                    (unchecked!) get key at i
+	m|s:noderef_key_at_index(i) -> k            (unchecked!) get no-deref key at i
 	m:val_at_index(i) -> v                      (unchecked!) get value at i
-	m:next_index([last_i]) -> i|-1              next occupied index
+	m|s:next_index([last_i]) -> i|-1            next occupied index
 
-	m:has(k) -> found?                          check if key is in map
-	m:at(k[,default]) -> &v                     &value for key
-	m[:get](k[,default]) -> v                   value for key
-	m:set(k,v) -> i                             add or update pair
-	m:set(k) -> &v                              add key and get &value
-	m:add(k,v) -> i|-1                          add new pair
-	m:add(k) -> &v|nil                          add new key and get &value
-	m:del(k) -> found?                          remove pair
-	for &k,&v in m do ... end                   iterate pairs
+	m|s:has(k) -> found?                        check if key is in map
+	m:at(k[,default]) -> &v                     get &value for key
+	m[:get](k[,default]) -> v                   get value for key
+	m:set(k,v) -> i                             add or get key and set value
+	m:set(k) -> &v                              add or get key and get &value
+	m:add(k,v) -> i|-1                          add key/val pair if key doesn't exist
+	m:add(k) -> &v|nil                          add key if doesn't exist and get &value
+	m:remove(k) -> found?                       remove/free pair
+	s:set(k) -> i                               add or get key
+	s:add(k) -> i|-1                            add key if doesn't exist
 
-	m:merge(m)                                  add new pairs from another map
-	m:update(m)                                 update pairs, overriding values
+	for &k,&v in m do ... end                   iterate key/val pairs in a map
+	for &k in s do ... end                      iterate keys in a set
+
+	m|s:merge(m|s)                              add new pairs/keys from another map/set
+	m|s:update(m|s)                             update pairs/keys, overriding values
 
 ]]
 
@@ -93,6 +105,8 @@ local function map_type(
 		keys: &key_t;
 		vals: &val_t;
 		state: state_t; --to be used by deref
+		noown_keys: bool; --not calling free() on removed keys
+		noown_vals: is_map and bool or tuple(); --not calling free() on removed vals
 	}
 
 	local st = state_t.empty
@@ -115,6 +129,8 @@ local function map_type(
 		keys = nil;
 		vals = nil;
 		state = st;
+		noown_keys = false;
+		noown_vals = [is_map and (`false) or `{}];
 	}
 
 	function map.metamethods.__typename(self)
@@ -145,6 +161,27 @@ local function map_type(
 		if default then return `self:get(i, default) else return `self:get(i) end
 	end)
 
+
+	function map.metamethods.__for(h, body)
+		if is_map then
+			return quote
+				for i = 0, h.n_buckets do
+					if h:has_at_index(i) then
+						[ body(`&h.keys[i], `&h.vals[i]) ]
+					end
+				end
+			end
+		else
+			return quote
+				for i = 0, h.n_buckets do
+					if h:has_at_index(i) then
+						[ body(`&h.keys[i]) ]
+					end
+				end
+			end
+		end
+	end
+
 	addmethods(map, function()
 
 		--ctor & dtor
@@ -153,11 +190,17 @@ local function map_type(
 			@h = [map.empty]
 		end
 
-		terra map.methods.free(h: &map) --can be reused after free
-			realloc(h.keys , 0)
-			realloc(h.flags, 0)
-			realloc(h.vals , 0)
-			fill(h)
+		--these are implemented later because they use has_at_index().
+		terra map.methods.free_keys :: {&map} -> {}
+		terra map.methods.free_vals :: {&map} -> {}
+
+		terra map:free() --can be reused after free
+			self:free_keys()
+			self:free_vals()
+			realloc(self.keys , 0)
+			realloc(self.flags, 0)
+			realloc(self.vals , 0)
+			self:init()
 		end
 
 		terra map.methods.clear(h: &map)
@@ -167,7 +210,7 @@ local function map_type(
 			h.n_occupied = 0
 		end
 
-		local pair_size = sizeof(key_t) + (is_map and sizeof(val_t) or 0)
+		local pair_size = sizeof(key_t) + (is_map and sizeof(val_t) or 0) + 1.0/4
 		terra map:__memsize(): intptr
 			return self.count * pair_size
 		end
@@ -183,7 +226,7 @@ local function map_type(
 			var last: size_t = i
 			var step: size_t = 0
 			while not isempty(h.flags, i) and (isdel(h.flags, i)
-				or not equal(deref(h, h.keys+i), &key))
+				or not equal(deref(h, &h.keys[i]), &key))
 			do
 				inc(step)
 				i = (i + step) and mask
@@ -319,7 +362,7 @@ local function map_type(
 				var last = i
 				while not isempty(h.flags, i)
 					and (isdel(h.flags, i)
-						or not equal(deref(h, h.keys+i), deref(h, &key)))
+						or not equal(deref(h, &h.keys[i]), deref(h, &key)))
 				do
 					if isdel(h.flags, i) then site = i end
 					inc(step)
@@ -341,15 +384,21 @@ local function map_type(
 				set_isboth_false(h.flags, x)
 				inc(h.count)
 				return h.DELETED, x
-			else -- present and not deleted
+			else -- present and not deleted, _not_ replacing
 				return h.PRESENT, x
 			end
 		end
 
-		terra map.methods.del_at_index(h: &map, i: size_t)
+		terra map.methods.remove_at_index(h: &map, i: size_t)
 			if i ~= h.n_buckets and not iseither(h.flags, i) then
 				set_isdel_true(h.flags, i)
 				h.count = h.count - 1
+				if not h.noown_keys then
+					call(deref(h, &h.keys[i]), 'free')
+				end
+				escape if is_map then emit quote
+					if not h.noown_vals then call(h.vals[i], 'free') end
+				end end end
 				return true
 			end
 			return false
@@ -358,7 +407,7 @@ local function map_type(
 		map.methods.has_at_index = macro(function(h, i)
 			return `i >= 0 and i < h.n_buckets and not iseither(h.flags, i)
 		end)
-		map.methods.key_at_index = macro(function(h, i) return `@deref(h, h.keys+i) end)
+		map.methods.key_at_index = macro(function(h, i) return `@deref(h, &h.keys[i]) end)
 		map.methods.val_at_index = macro(function(h, i) return `h.vals[i] end)
 		map.methods.noderef_key_at_index = macro(function(h, i) return `h.keys[i] end)
 
@@ -378,6 +427,42 @@ local function map_type(
 				in r
 			end
 		end)
+
+		--implement these here because they need has_at_index() defined...
+
+		if cancall(deref_key_t, 'free') then
+			if is_map then
+				terra map:free_keys()
+					if not self.noown_keys then
+						for k,_ in self do
+							deref(self, k):free()
+						end
+					end
+				end
+			else
+				terra map:free_keys()
+					if not self.noown_keys then
+						for k in self do
+							deref(self, k):free()
+						end
+					end
+				end
+			end
+		else
+			terra map:free_keys() end
+		end
+
+		if cancall(val_t, 'free') and is_map then
+			terra map:free_vals()
+				if not self.noown_vals then
+					for _,v in self do
+						v:free()
+					end
+				end
+			end
+		else
+			terra map:free_vals() end
+		end
 
 		--hi-level (key/value pair-based) API
 
@@ -420,9 +505,10 @@ local function map_type(
 				var ret, i = h:setkey(key); assert(i ~= -1)
 				if ret ~= h.PRESENT then
 					h.vals[i] = val
+					return i
+				else
 					return -1
 				end
-				return i
 			end)
 			map.methods.add:adddefinition(terra(h: &map, key: key_t)
 				var ret, i = h:setkey(key); assert(i ~= -1)
@@ -440,31 +526,11 @@ local function map_type(
 			end
 		end
 
-		terra map.methods.del(h: &map, key: deref_key_t): bool
+		terra map.methods.remove(h: &map, key: deref_key_t): bool
 			var i = h:index(key, -1)
 			if i == -1 then return false end
-			h:del_at_index(i)
+			h:remove_at_index(i)
 			return true
-		end
-
-		function map.metamethods.__for(h, body)
-			if is_map then
-				return quote
-					for i = 0, h.n_buckets do
-						if h:has_at_index(i) then
-							[ body(`&h.keys[i], `&h.vals[i]) ]
-						end
-					end
-				end
-			else
-				return quote
-					for i = 0, h.n_buckets do
-						if h:has_at_index(i) then
-							[ body(`&h.keys[i]) ]
-						end
-					end
-				end
-			end
 		end
 
 		if is_map then
@@ -540,3 +606,9 @@ low.map = macro(
 	--just the type, and you can also pass a custom C namespace.
 	map_type
 )
+
+low.set = macro(function(key_t, size_t)
+	return map.fromterra(key_t, nil, size_t)
+end, function(key_t, size_t)
+	return map.fromlua(key_t, nil, size_t)
+end)

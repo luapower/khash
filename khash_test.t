@@ -1,5 +1,27 @@
 setfenv(1, require'low')
 
+local S = arr(int8)
+local struct V {x: int}
+local n = global(int, 0)
+terra V:free() n = n + 1 end
+local terra test_own_keys()
+	var s1 = S'Hello'
+	var s2 = S'World!'
+	var h = map([&S], V)
+	h:set(&s1, V{5})
+	h:set(&s2, V{7})
+	h:set(&s2, V{8})
+	h:set(&s1, V{3})
+	assert(h(s2).x == 8)
+	assert(h(s1).x == 3)
+	assert(h.count == 2)
+	h:free()
+	assert(s1.len == 0) --freed by h
+	assert(s2.len == 0) --freed by h
+	assert(n == 2)
+end
+test_own_keys()
+
 local random_keys = function(key_t, gen_key, n)
 	return quote
 		var keys = alloc(key_t, n)
@@ -94,7 +116,7 @@ local terra test_speed()
 	h:set(7, 8)
 	h:set(12, 13)
 	assert(h:has(12))
-	h:del(7)
+	h:remove(7)
 	assert(not h:has(7))
 	assert(h:get(7, -1) == -1)
 	pfn('count: %d', h.count)
