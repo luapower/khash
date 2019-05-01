@@ -103,7 +103,7 @@ local map_type = memoize(function(
 		keys: &key_t;
 		vals: &val_t;
 		state: state_t; --to be used by deref
-		context: context_t or tuple(); --to be used by free
+		context: context_t; --to be used by free
 	}
 
 	local st = state_t.empty
@@ -183,8 +183,15 @@ local map_type = memoize(function(
 
 		--ctor & dtor
 
-		terra map.methods.init(h: &map)
-			@h = [map.empty]
+		if context_t ~= tuple() then
+			terra map.methods.init(h: &map, context: context_t)
+				@h = [map.empty]
+				h.context = context
+			end
+		else
+			terra map.methods.init(h: &map)
+				@h = [map.empty]
+			end
 		end
 
 		--these are implemented later because they use has_at_index().
@@ -196,10 +203,13 @@ local map_type = memoize(function(
 		terra map:free() --can be reused after free
 			if own_keys then self:free_keys() end
 			if own_vals then self:free_vals() end
-			realloc(self.keys , 0)
-			realloc(self.flags, 0)
-			realloc(self.vals , 0)
-			self:init()
+			self.keys  = realloc(self.keys , 0)
+			self.flags = realloc(self.flags, 0)
+			self.vals  = realloc(self.vals , 0)
+			self.n_buckets = 0
+			self.n_occupied = 0
+			self.upper_bound = 0
+			self.count = 0
 		end
 
 		terra map.methods.clear(h: &map)
@@ -430,7 +440,7 @@ local map_type = memoize(function(
 		--implement these here because they need has_at_index() defined...
 
 		if cancall(deref_key_t, 'free') then
-			if context_t then
+			if context_t ~= tuple() then
 				terra map:free_key(k: &deref_key_t) (@k):free(self.context) end
 			else
 				terra map:free_key(k: &deref_key_t) (@k):free() end
@@ -454,7 +464,7 @@ local map_type = memoize(function(
 		end
 
 		if cancall(val_t, 'free') and is_map then
-			if context_t then
+			if context_t ~= tuple() then
 				terra map:free_val(v: &val_t) (@v):free(self.context) end
 			else
 				terra map:free_val(v: &val_t) (@v):free() end
@@ -592,7 +602,7 @@ local map_type = function(key_t, val_t, size_t)
 	deref_key_t = deref_key_t or key_t
 	size_t = size_t or int --it's faster to use 64bit hashes for 64bit keys
 	state_t = state_t or tuple()
-	context_t = context_t or nil
+	context_t = context_t or tuple()
 	own_keys = own_keys ~= false
 	own_vals = own_vals ~= false
 	return map_type(
