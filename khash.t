@@ -23,9 +23,6 @@
 	m|s.capacity                                (read/write) grow/shrink hashmap
 	m|s.min_capacity                            (write/only) grow hashmap
 
-	m|s.noown_keys                              (read/write) doesn't own the keys
-	m.noown_vals                                (read/write) doesn't own the values
-
 	m|s:index(k[,default]) -> i                 lookup key and return pair index
 	m|s:setkey(k) -> m.PRESENT|ABSENT|DELETED|-1, i|-1  occupy a key
 	m|s:remove_at_index(i) -> found?            remove/free pair at i
@@ -85,14 +82,15 @@ local fsize = macro(function(m) return `iif(m < 16, 1, m >> 4) end)
 
 local UPPER = 0.77
 
-local function map_type(
+local realloc = macro(function(p, len)
+	return `low.realloc(p, len, 'khash')
+end)
+
+local map_type = memoize(function(
 	key_t, val_t, user_hash, user_equal, size_t,
-	deref, deref_key_t, state_t
+	deref, deref_key_t, state_t, context_t, own_keys, own_vals
 )
-
-	local is_map = val_t and true or false
-	val_t = val_t or tuple() --optimized out
-
+	local is_map = sizeof(val_t) > 0
 	local hash  = user_hash  or hash
 	local equal = user_equal or equal
 
@@ -105,8 +103,7 @@ local function map_type(
 		keys: &key_t;
 		vals: &val_t;
 		state: state_t; --to be used by deref
-		noown_keys: bool; --not calling free() on removed keys
-		noown_vals: is_map and bool or tuple(); --not calling free() on removed vals
+		context: context_t or tuple(); --to be used by free
 	}
 
 	local st = state_t.empty
@@ -129,8 +126,6 @@ local function map_type(
 		keys = nil;
 		vals = nil;
 		state = st;
-		noown_keys = false;
-		noown_vals = [is_map and (`false) or `{}];
 	}
 
 	function map.metamethods.__typename(self)
@@ -161,7 +156,6 @@ local function map_type(
 		if default then return `self:get(i, default) else return `self:get(i) end
 	end)
 
-
 	function map.metamethods.__for(h, body)
 		if is_map then
 			return quote
@@ -184,6 +178,9 @@ local function map_type(
 
 	addmethods(map, function()
 
+		local own_keys = own_keys and cancall(deref_key_t, 'free')
+		local own_vals = is_map and own_vals and cancall(val_t, 'free')
+
 		--ctor & dtor
 
 		terra map.methods.init(h: &map)
@@ -193,10 +190,12 @@ local function map_type(
 		--these are implemented later because they use has_at_index().
 		terra map.methods.free_keys :: {&map} -> {}
 		terra map.methods.free_vals :: {&map} -> {}
+		terra map.methods.free_key  :: {&map, &deref_key_t} -> {}
+		terra map.methods.free_val  :: {&map, &val_t} -> {}
 
 		terra map:free() --can be reused after free
-			self:free_keys()
-			self:free_vals()
+			if own_keys then self:free_keys() end
+			if own_vals then self:free_vals() end
 			realloc(self.keys , 0)
 			realloc(self.flags, 0)
 			realloc(self.vals , 0)
@@ -210,9 +209,13 @@ local function map_type(
 			h.n_occupied = 0
 		end
 
-		local pair_size = sizeof(key_t) + (is_map and sizeof(val_t) or 0) + 1.0/4
+		local pair_size = sizeof(key_t) + sizeof(val_t) + 1.0/4
 		terra map:__memsize(): intptr
 			return self.count * pair_size
+		end
+
+		terra map:__rawmemsize(): intptr
+			return self.n_buckets * (sizeof(key_t) + sizeof(val_t) + 0.25)
 		end
 
 		--low level (slot-based) API (and the actual algorithm).
@@ -393,12 +396,8 @@ local function map_type(
 			if i ~= h.n_buckets and not iseither(h.flags, i) then
 				set_isdel_true(h.flags, i)
 				h.count = h.count - 1
-				if not h.noown_keys then
-					call(deref(h, &h.keys[i]), 'free')
-				end
-				escape if is_map then emit quote
-					if not h.noown_vals then call(h.vals[i], 'free') end
-				end end end
+				if own_keys then h:free_key(deref(h, &h.keys[i])) end
+				if own_vals then h:free_val(&h.vals[i]) end
 				return true
 			end
 			return false
@@ -431,37 +430,43 @@ local function map_type(
 		--implement these here because they need has_at_index() defined...
 
 		if cancall(deref_key_t, 'free') then
+			if context_t then
+				terra map:free_key(k: &deref_key_t) (@k):free(self.context) end
+			else
+				terra map:free_key(k: &deref_key_t) (@k):free() end
+			end
 			if is_map then
 				terra map:free_keys()
-					if not self.noown_keys then
-						for k,_ in self do
-							deref(self, k):free()
-						end
+					for k,_ in self do
+						self:free_key(deref(self, k))
 					end
 				end
 			else
 				terra map:free_keys()
-					if not self.noown_keys then
-						for k in self do
-							deref(self, k):free()
-						end
+					for k in self do
+						self:free_key(deref(self, k))
 					end
 				end
 			end
 		else
 			terra map:free_keys() end
+			terra map:free_key(k: &deref_key_t) end
 		end
 
 		if cancall(val_t, 'free') and is_map then
+			if context_t then
+				terra map:free_val(v: &val_t) (@v):free(self.context) end
+			else
+				terra map:free_val(v: &val_t) (@v):free() end
+			end
 			terra map:free_vals()
-				if not self.noown_vals then
-					for _,v in self do
-						v:free()
-					end
+				for _,v in self do
+					self:free_val(v)
 				end
 			end
 		else
 			terra map:free_vals() end
+			terra map:free_val(v: &val_t) end
 		end
 
 		--hi-level (key/value pair-based) API
@@ -548,8 +553,7 @@ local function map_type(
 	end) --addmethods()
 
 	return map
-end
-map_type = memoize(map_type)
+end)
 
 --specialization for different key and value types ---------------------------
 
@@ -572,25 +576,28 @@ keytype[int64] = {
 }
 keytype[uint64] = keytype[int64]
 
-local deref_pointer = macro(function(self, k) return `@k end)
 local pass_through = macro(function(self, k) return k end)
 
 local map_type = function(key_t, val_t, size_t)
-	local hash, equal, deref, deref_key_t, state_t
+	local hash, equal, deref, deref_key_t, state_t, context_t, own_keys, own_vals
 	if terralib.type(key_t) == 'table' then
 		local t = key_t
 		key_t, val_t, size_t = t.key_t, t.val_t, t.size_t
-		hash, equal, deref, deref_key_t, state_t =
-			t.hash, t.equal, t.deref, t.deref_key_t, t.state_t
+		hash, equal, deref, deref_key_t, state_t, context_t, own_keys, own_vals =
+			t.hash, t.equal, t.deref, t.deref_key_t, t.state_t, t.context_t, t.own_keys, t.own_vals
 	end
 	assert(key_t, 'key type missing')
-	deref_key_t = deref_key_t or (key_t:ispointer() and key_t.type) or key_t
-	deref = deref or (key_t:ispointer() and deref_pointer) or pass_through
+	val_t = val_t or tuple()
+	deref = deref or pass_through
+	deref_key_t = deref_key_t or key_t
 	size_t = size_t or int --it's faster to use 64bit hashes for 64bit keys
 	state_t = state_t or tuple()
+	context_t = context_t or nil
+	own_keys = own_keys ~= false
+	own_vals = own_vals ~= false
 	return map_type(
 		key_t, val_t, hash, equal, size_t,
-		deref, deref_key_t, state_t)
+		deref, deref_key_t, state_t, context_t, own_keys, own_vals)
 end
 
 low.map = macro(
