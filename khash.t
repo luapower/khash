@@ -83,7 +83,7 @@ local fsize = macro(function(m) return `iif(m < 16, 1, m >> 4) end)
 local UPPER = 0.77
 
 local realloc = macro(function(p, len)
-	return `low.realloc(p, len, 'khash')
+	return `_M.realloc(p, len, 'khash')
 end)
 
 local map_type = memoize(function(
@@ -610,7 +610,7 @@ local map_type = function(key_t, val_t, size_t)
 		deref, deref_key_t, state_t, context_t, own_keys, own_vals)
 end
 
-low.map = macro(
+map = macro(
 	--calling it from Terra returns a new map.
 	function(key_t, val_t, size_t)
 		key_t = key_t and key_t:astype()
@@ -624,8 +624,10 @@ low.map = macro(
 	map_type
 )
 
-low.set = macro(function(key_t, size_t)
+set = macro(function(key_t, size_t)
 	return map.fromterra(key_t, nil, size_t)
 end, function(key_t, size_t)
 	return map.fromlua(key_t, nil, size_t)
 end)
+
+return _M
